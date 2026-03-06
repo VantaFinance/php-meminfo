@@ -28,6 +28,15 @@ $ make
 $ make install
 ```
 
+
+## Docker Build
+
+
+```dockerfile
+RUN git clone https://github.com/VantaFinance/php-meminfo && cd php-meminfo/extension && phpize && ./configure --enable-meminfo && make && make install && echo 'extension=meminfo.so' >> /usr/local/etc/php/conf.d/docker-php-ext-meminfo.ini
+```
+
+
 ## Enabling the extension
 Add the following line to your `php.ini`:
 
