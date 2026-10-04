@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/cmake-build-${presetName}",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    { "name": "php-7.0", "displayName": "PHP 7.0", "inherits": "base", "cacheVariables": { "PHP_VERSION": "7.0" } },
+    { "name": "php-7.1", "displayName": "PHP 7.1", "inherits": "base", "cacheVariables": { "PHP_VERSION": "7.1" } },
+    { "name": "php-7.2", "displayName": "PHP 7.2", "inherits": "base", "cacheVariables": { "PHP_VERSION": "7.2" } },
+    { "name": "php-7.3", "displayName": "PHP 7.3", "inherits": "base", "cacheVariables": { "PHP_VERSION": "7.3" } },
+    { "name": "php-7.4", "displayName": "PHP 7.4", "inherits": "base", "cacheVariables": { "PHP_VERSION": "7.4" } },
+    { "name": "php-8.0", "displayName": "PHP 8.0", "inherits": "base", "cacheVariables": { "PHP_VERSION": "8.0" } },
+    { "name": "php-8.1", "displayName": "PHP 8.1", "inherits": "base", "cacheVariables": { "PHP_VERSION": "8.1" } }
+  ]
+}

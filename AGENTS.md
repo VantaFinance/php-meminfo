@@ -16,7 +16,8 @@ analyzer that inspects those dumps to help track down memory leaks.
 - **Database:** none — the persistence format is a JSON dump file
 - **ORM:** not applicable
 - **Build:** `phpize` + `config.m4` for the extension, Composer for the analyzer; optional Docker
-  build (`Dockerfile`, `php:<version>-cli-alpine`) selected by `PHP_VERSION`
+  build (`Dockerfile`, `php:<version>-cli-alpine`) selected by `PHP_VERSION`; `CMakeLists.txt` is
+  IDE-only (CLion code insight), never used to build the extension
 - **Testing:** `.phpt` (extension), phpspec (analyzer)
 - **Supported PHP:** 7.0 – 8.1 (CI matrix)
 
@@ -40,6 +41,9 @@ doc/                          usage guides and example scripts
 .github/workflows/            CI: build extension + run both test suites on PHP 7.0–8.1
 Dockerfile                    builds + enables the extension for a given PHP_VERSION (image meminfo:php-X.Y)
 .dockerignore                 keeps host build artifacts and vendor/ out of the Docker build context
+CMakeLists.txt                IDE-only CLion project model over extension/ (Zend headers from .ide/)
+CMakePresets.json             one CMake profile per PHP version (php-7.0 … php-8.1)
+.ide/                         PHP headers extracted by `make ide` (git-ignored)
 .ai-factory/                  AI Factory configuration and generated context
 .claude/skills/               project-specific agent skills
 ```
@@ -80,6 +84,8 @@ make docker-test  PHP_VERSION=7.4   # both test suites inside that image
 make docker-matrix  # docker-test for every version in PHP_VERSIONS (7.0 – 8.1)
 make docker-shell PHP_VERSION=7.4   # bash shell in the image
 make docker-clean   # remove all meminfo:php-* images
+make ide PHP_VERSION=7.4   # extract PHP 7.4 headers into .ide/php-7.4 for CLion
+make ide-clean      # remove extracted headers
 ```
 
 Build against a specific PHP by overriding the toolchain variables:

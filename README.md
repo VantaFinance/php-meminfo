@@ -82,6 +82,26 @@ Set `DOCKER_PLATFORM` to build for another architecture, e.g. `DOCKER_PLATFORM=l
 The first build of each version is slow, especially for PHP 7.0 whose Alpine mirror can take several
 minutes to install the compiler toolchain; later builds reuse the cached layer.
 
+## IDE setup (CLion)
+
+`CMakeLists.txt` exists only to give CLion code insight into the Zend API; the extension is still built
+with phpize. The PHP headers come from the Docker image of the version you want to work against:
+
+```bash
+$ make ide PHP_VERSION=8.1   # copy the PHP 8.1 headers into .ide/php-8.1/
+$ make ide-clean             # remove all extracted headers
+```
+
+Then in CLion:
+
+1. Right-click `CMakeLists.txt` → **Load CMake Project**.
+2. In Settings → Build, Execution, Deployment → CMake, disable the auto-created `Debug` profile and
+   enable the `php-X.Y` profile(s) from `CMakePresets.json`.
+3. Select the profile matching the extracted headers. `#if PHP_VERSION_ID` branches follow that version.
+
+When switching to a version whose headers are missing, run `make ide PHP_VERSION=X.Y` first — CMake
+stops with that hint otherwise.
+
 
 ## Enabling the extension
 Add the following line to your `php.ini`:
