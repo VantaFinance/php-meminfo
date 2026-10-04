@@ -184,6 +184,28 @@ docker-clean: ## Remove all meminfo:php-* images
 		$(DOCKER) image rm $$images; \
 	fi
 
+##@ IDE
+
+# PHP headers copied out of $(DOCKER_TAG) for code insight in CLion (see CMakeLists.txt).
+# Keep the presets in CMakePresets.json in sync with PHP_VERSIONS.
+IDE_DIR     ?= .ide
+IDE_PHP_DIR := $(IDE_DIR)/php-$(PHP_VERSION)
+
+.PHONY: ide
+ide: docker-build ## Extract PHP headers for CLion (usage: make ide PHP_VERSION=7.4)
+	@id=$$($(DOCKER) create $(DOCKER_PLATFORM_FLAG) $(DOCKER_TAG)); \
+	rm -rf $(IDE_PHP_DIR); \
+	mkdir -p $(IDE_PHP_DIR)/include; \
+	status=0; \
+	$(DOCKER) cp -q $$id:/usr/local/include/php $(IDE_PHP_DIR)/include/php || status=$$?; \
+	$(DOCKER) rm $$id >/dev/null; \
+	if [ $$status -ne 0 ]; then exit $$status; fi
+	@echo "PHP $(PHP_VERSION) headers in $(IDE_PHP_DIR)/include/php"
+
+.PHONY: ide-clean
+ide-clean: ## Remove the PHP headers extracted for the IDE
+	rm -rf $(IDE_DIR)
+
 ##@ Cleanup
 
 .PHONY: clean-ext

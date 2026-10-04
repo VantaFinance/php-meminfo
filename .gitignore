@@ -1,0 +1,5 @@
+# PHP headers extracted for IDE code insight (make ide)
+.ide/
+
+# CMake build directories (CLion, CMakePresets.json)
+cmake-build-*/
