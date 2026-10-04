@@ -1,3 +1,12 @@
+# Unreleased
+
+## Bug fixes
+ - Fixes loading of the extension on PHP 7.4 (`GC_TRY_ADDREF: symbol not found`) and the wrong argument passed to `get_properties` on PHP 7.4
+ - Object properties are no longer read through `__debugInfo` on PHP 7.0 – 7.3, matching the behaviour on PHP 7.4+
+
+## Improvement
+ - Adds a `Dockerfile` and `make docker-build` / `docker-test` / `docker-matrix` targets to build and test the extension for a chosen `PHP_VERSION`
+
 # 1.1.1 PHP Meminfo v1.1.1 (2021-02-17)
 Fixes segfault on symbol table not properly rebuilt.
 

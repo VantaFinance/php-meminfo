@@ -398,15 +398,21 @@ void meminfo_zval_dump(php_stream * stream, char * frame_label, zend_string * sy
 
         php_stream_printf(stream, "        \"object_handle\" : \"%d\",\n", Z_OBJ_HANDLE_P(zv));
 
-#if PHP_VERSION_ID >= 70400
+#if PHP_VERSION_ID >= 80000
         zend_object *zobj = Z_OBJ_P(zv);
         properties = zobj->handlers->get_properties(zobj);
         if (properties) {
             GC_TRY_ADDREF(properties);
         }
+#elif PHP_VERSION_ID >= 70400
+        /* PHP 7.4: get_properties takes a zval and GC_TRY_ADDREF does not exist yet */
+        properties = Z_OBJ_HANDLER_P(zv, get_properties) ? Z_OBJ_HANDLER_P(zv, get_properties)(zv) : NULL;
+        if (properties &&!(GC_FLAGS(properties) & GC_IMMUTABLE)) {
+            GC_ADDREF(properties);
+        }
 #else
-        int is_temp;
-        properties = Z_OBJDEBUG_P(zv, is_temp);
+        /* Borrowed reference: get_properties never calls __debugInfo and needs no release */
+        properties = Z_OBJ_HANDLER_P(zv, get_properties) ? Z_OBJPROP_P(zv) : NULL;
 #endif
 
         if (properties != NULL) {
@@ -414,11 +420,6 @@ void meminfo_zval_dump(php_stream * stream, char * frame_label, zend_string * sy
 
 #if PHP_VERSION_ID >= 70400
             zend_release_properties(properties);
-#else
-            if (is_temp) {
-                zend_hash_destroy(properties);
-                efree(properties);
-            }
 #endif
         }
 #if PHP_VERSION_ID >= 80100

@@ -16,6 +16,26 @@ For older versions of PHP, you can use the following releases:
  - 5.6: PHP Meminfo v1.1
  - 5.5: PHP Meminfo v1.0.5 (may work with PHP 5.3 and PHP 5.4 but not tested)
 
+Quick start with Make
+---------------------
+A `Makefile` in the repository root wraps the commands below. Run `make help` to list every target.
+
+```bash
+$ make build          # build the extension (phpize + configure + make, as needed)
+$ make install        # install the analyzer dependencies via Composer
+$ make test           # run both test suites (.phpt for the extension, phpspec for the analyzer)
+$ make check          # lint + both test suites
+$ make clean          # remove build artifacts and dependencies
+```
+
+To build against a specific PHP installation, override the toolchain variables:
+
+```bash
+$ make build PHPIZE=/usr/local/php-7.4/bin/phpize PHP_CONFIG=/usr/local/php-7.4/bin/php-config
+```
+
+The manual steps remain fully supported and are documented below.
+
 Compilation instructions
 ------------------------
 ## Compilation
@@ -35,6 +55,32 @@ $ make install
 ```dockerfile
 RUN git clone https://github.com/VantaFinance/php-meminfo && cd php-meminfo/extension && phpize && ./configure --enable-meminfo && make && make install && echo 'extension=meminfo.so' >> /usr/local/etc/php/conf.d/docker-php-ext-meminfo.ini
 ```
+
+## Build and test in Docker
+
+To work on the extension without a local PHP toolchain, the repository `Dockerfile` builds it on top of
+`php:<version>-cli-alpine`. The PHP version is selected with `PHP_VERSION` (`7.0`, `7.1`, `7.2`, `7.3`,
+`7.4`, `8.0`, `8.1`; default `8.1`):
+
+```bash
+$ make docker-build PHP_VERSION=7.4   # build the image meminfo:php-7.4 with the extension enabled
+$ make docker-test  PHP_VERSION=7.4   # run the .phpt and phpspec suites inside that image
+$ make docker-matrix                  # docker-test for every supported PHP version
+$ make docker-shell PHP_VERSION=7.4   # open a bash shell in the image
+$ make docker-clean                   # remove all meminfo:php-* images
+```
+
+The extension only lives inside the image, nothing is written to the host. Use the image to take a dump of
+your own script:
+
+```bash
+$ docker run --rm -v "$PWD":/app meminfo:php-8.1 php /app/script.php
+```
+
+Set `DOCKER_PLATFORM` to build for another architecture, e.g. `DOCKER_PLATFORM=linux/amd64` on Apple Silicon.
+
+The first build of each version is slow, especially for PHP 7.0 whose Alpine mirror can take several
+minutes to install the compiler toolchain; later builds reuse the cached layer.
 
 
 ## Enabling the extension
