@@ -41,11 +41,23 @@ jobs:
           cd extension/
           REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test
 
+      - name: Show failed extension tests
+        if: failure()
+        run: |
+          for diff in extension/tests/*.diff; do
+            [ -f "$diff" ] || continue
+            echo "::group::$diff"
+            cat "$diff"
+            echo "::endgroup::"
+          done
+
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: ext-tests-output-php-${{ matrix.php-versions }}
-          path: 'extension/tests/*.out'
+          path: |
+            extension/tests/*.out
+            extension/tests/*.diff
 
       - name: Test the analyzers
         run: |

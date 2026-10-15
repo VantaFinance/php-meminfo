@@ -79,11 +79,20 @@ CODE;
             . ' --dir=' . escapeshellarg($dumpDir)
             . ' --timeout=20';
 
+        // stderr is kept aside rather than discarded: when the command fails,
+        // its message is what explains the failure.
+        $commandStderr = $dumpDir . '/dump-meminfo.err';
         $output = array();
         $exitCode = 0;
-        exec($command . ' 2>/dev/null', $output, $exitCode);
+        exec($command . ' 2>' . escapeshellarg($commandStderr), $output, $exitCode);
 
         echo "dump-meminfo exit code: ", $exitCode, "\n";
+
+        if ($exitCode !== 0 && is_file($commandStderr)) {
+            echo "dump-meminfo stderr: ", trim(file_get_contents($commandStderr)), "\n";
+        }
+
+        @unlink($commandStderr);
         echo "dump-meminfo printed one path: ", count($output) === 1 ? 'yes' : 'no', "\n";
 
         if (count($output) === 1 && is_file($output[0])) {

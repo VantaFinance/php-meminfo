@@ -8,7 +8,9 @@
  * the dump the target wrote.
  *
  * Written for PHP 7.0 syntax — it has to run on the oldest version the
- * extension supports.
+ * extension supports. It also sticks to functions that are always built in
+ * (no ctype, posix or json): it must work under `php -n`, where shared
+ * extensions are not loaded.
  *
  * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
  * @copyright 2010-2021 Benoit Jacquemont
@@ -96,7 +98,7 @@ function dump_meminfo_parse($argv)
         if (strpos($argument, '--timeout=') === 0) {
             $timeout = substr($argument, strlen('--timeout='));
 
-            if (!ctype_digit($timeout) || (int) $timeout < 1) {
+            if (!preg_match('/^[0-9]+$/D', $timeout) || (int) $timeout < 1) {
                 dump_meminfo_write(STDERR, 'dump-meminfo: --timeout must be a positive integer');
 
                 return EXIT_USAGE;
@@ -119,7 +121,7 @@ function dump_meminfo_parse($argv)
             return EXIT_USAGE;
         }
 
-        if (!ctype_digit($argument) || (int) $argument < 1) {
+        if (!preg_match('/^[0-9]+$/D', $argument) || (int) $argument < 1) {
             dump_meminfo_write(STDERR, 'dump-meminfo: pid must be a positive integer');
 
             return EXIT_USAGE;
