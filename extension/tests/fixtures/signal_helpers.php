@@ -88,12 +88,23 @@ function meminfo_test_remove_dir($dir)
  * ext-posix may be built shared and therefore absent under -n, so `kill` is
  * used as a fallback.
  *
- * @param int $signal
+ * @param int|null $signal defaults to SIGURG, whose number differs between
+ *                         Linux (23) and macOS/BSD (16)
  *
  * @return bool
  */
-function meminfo_test_raise_signal($signal = 23)
+function meminfo_test_raise_signal($signal = null)
 {
+    if ($signal === null) {
+        if (defined('SIGURG')) {
+            $signal = SIGURG;
+        } elseif (stripos(PHP_OS, 'Darwin') === 0 || stripos(PHP_OS, 'BSD') !== false) {
+            $signal = 16;
+        } else {
+            $signal = 23;
+        }
+    }
+
     if (function_exists('posix_kill')) {
         return posix_kill(getmypid(), $signal);
     }

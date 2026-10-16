@@ -551,7 +551,11 @@ static void meminfo_signal_handler(int signal_number, siginfo_t *info, void *con
 
     MEMINFO_G(dump_requested) = 1;
 
+#if PHP_VERSION_ID >= 80200
+    zend_atomic_bool_store_ex(&EG(vm_interrupt), true);
+#else
     EG(vm_interrupt) = 1;
+#endif
 }
 
 /**
