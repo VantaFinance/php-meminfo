@@ -156,6 +156,14 @@ the application is never interrupted mid-operation.
 $ dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force]
 ```
 
+Without `--dir` the target writes to its own `meminfo.dump_dir`. With it, the
+dump is written to `DIR` (relative paths are resolved by the caller): the
+trigger leaves the directory in a request file, `/tmp/meminfo-request-<pid>…`,
+which the target reads when it serves the signal and the trigger removes
+afterwards. If the target cannot write there, the trigger fails at once with the
+target's reason instead of waiting out `--timeout`. A target running a meminfo
+that predates this cannot be told where to write; look in its `meminfo.dump_dir`.
+
 It prints the path of the finished dump on stdout and nothing else, so it
 composes directly with the analyzer:
 
@@ -209,7 +217,7 @@ The message always goes to stderr, so `$(dump-meminfo PID)` stays usable.
 | Setting | Default | Meaning |
 |---|---|---|
 | `meminfo.dump_signal` | `SIGURG` | Signal the process dumps on, by name (with or without the `SIG` prefix) or number. `0` or empty disables it. |
-| `meminfo.dump_dir` | system temp dir | Where dump files are written. The trigger looks in its own `meminfo.dump_dir` unless `--dir` / `'dir'` says otherwise, so both sides must agree. On macOS the system temp dir (`$TMPDIR`) differs per user — set this explicitly there. |
+| `meminfo.dump_dir` | system temp dir | Where dump files are written unless the trigger passes `--dir` / `'dir'`. Without it, the trigger looks in its own `meminfo.dump_dir`, so both sides must agree. On macOS the system temp dir (`$TMPDIR`) differs per user — set this explicitly there, or pass `--dir`. |
 
 Both are `PHP_INI_SYSTEM`, so they belong in `php.ini`:
 
@@ -299,7 +307,11 @@ is no dump to be had that way, only a dead process.
   collect a backtrace; a signal arriving in that window may be lost. Retry.
 - **Without `sigqueue()` (macOS), concurrent requests are not told apart.** Two
   triggers asking the same process at the same moment may be handed the same
-  file. Requests made one after the other always get separate dumps.
+  file, and a second one passing `--dir` while the first is still waiting is
+  refused ("another dump request is pending"). Requests made one after the other
+  always get separate dumps. The signal is resent at most three times, so a
+  target writing somewhere the trigger cannot see produces a bounded number of
+  dumps rather than one per second.
 - **The analyzer needs memory for large dumps**, roughly a kilobyte per item:
   ```bash
   $ php -d memory_limit=-1 analyzer/bin/analyzer summary /tmp/meminfo-....json
@@ -327,6 +339,11 @@ addresses — everything the request had in memory. Treat it as sensitive:
 - A signal whose default action would terminate or stop the target is never
   sent to a process that is known not to handle it, not even with `--force`.
   `--force` only covers the case where that cannot be determined.
+- A request file from `--dir` is honoured only if it is a regular file with a
+  single link, not a symlink, and owned by the target's own user or by root —
+  the users that may signal it anyway — and names an absolute directory.
+  Anything else at that name is ignored. Whoever may ask for a dump can thus
+  choose where it goes; nobody else can.
 - **`meminfo.dump_dir` must not be writable by anyone you do not trust.** The
   returned path is verified before it is handed back, but anything that can
   write to that directory can replace the file afterwards. The default system

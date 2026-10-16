@@ -38,6 +38,7 @@ CODE;
     if ($runningAsRoot) {
         // root ignores directory permissions, so there is nothing to observe.
         echo "unwritable directory refused: yes\n";
+        echo "reported at once with the reason: yes\n";
         echo "nothing written to the directory: yes\n";
         echo "target stdout untouched: yes\n";
         echo "target stderr untouched: yes\n";
@@ -49,11 +50,18 @@ CODE;
         $child = meminfo_test_spawn($busyCode, array('meminfo.dump_dir' => $readOnlyDir));
         $pid = meminfo_test_child_pid($child);
 
+        $startedAt = microtime(true);
         $attempt = $pid > 0
             ? meminfo_test_try_dump_process($pid, array('dir' => $readOnlyDir, 'timeout' => 3))
             : array('path' => null, 'exception' => null);
+        $elapsed = microtime(true) - $startedAt;
 
         echo "unwritable directory refused: ", $attempt['path'] === null ? 'yes' : 'no', "\n";
+        // The target answers the request with its reason; the trigger must not
+        // sit out its timeout waiting for a file that will never appear.
+        $reason = $attempt['exception'] !== null ? $attempt['exception']->getMessage() : '';
+        echo "reported at once with the reason: ",
+            ($elapsed < 2.5 && strpos($reason, 'cannot create') !== false) ? 'yes' : 'no (' . round($elapsed, 1) . ' s: ' . $reason . ')', "\n";
         echo "nothing written to the directory: ",
             count(glob($readOnlyDir . '/*')) === 0 ? 'yes' : 'no', "\n";
         echo "target stdout untouched: ", filesize($child['stdout']) === 0 ? 'yes' : 'no', "\n";
@@ -179,6 +187,7 @@ CODE
 ?>
 --EXPECT--
 unwritable directory refused: yes
+reported at once with the reason: yes
 nothing written to the directory: yes
 target stdout untouched: yes
 target stderr untouched: yes
