@@ -142,6 +142,11 @@ $ dump-meminfo 12345
 /tmp/meminfo-1834201933.json
 ```
 
+On systems without `sigqueue()`, such as macOS, the request cannot carry an id,
+so the target names the file after its pid and the time the dump started
+(`meminfo-12345-1792181893-19785.json`) and the trigger looks for a file of that
+shape written after it asked.
+
 The only requirement on the target is that the extension is loaded. On
 receiving the signal it records the request and raises the engine's interrupt
 flag; the dump itself is written at the next safe point between two opcodes, so
@@ -204,7 +209,7 @@ The message always goes to stderr, so `$(dump-meminfo PID)` stays usable.
 | Setting | Default | Meaning |
 |---|---|---|
 | `meminfo.dump_signal` | `SIGURG` | Signal the process dumps on, by name (with or without the `SIG` prefix) or number. `0` or empty disables it. |
-| `meminfo.dump_dir` | system temp dir | Where dump files are written. |
+| `meminfo.dump_dir` | system temp dir | Where dump files are written. The trigger looks in its own `meminfo.dump_dir` unless `--dir` / `'dir'` says otherwise, so both sides must agree. On macOS the system temp dir (`$TMPDIR`) differs per user — set this explicitly there. |
 
 Both are `PHP_INI_SYSTEM`, so they belong in `php.ini`:
 
@@ -251,8 +256,9 @@ master as well; take the pid from the status page.
 
 ### When it refuses
 
-Before signalling anything, the trigger checks `/proc/<pid>/status` to see
-whether the target actually handles the signal. The handler exists only for the
+Before signalling anything, the trigger checks `/proc/<pid>/status` (on macOS,
+the kernel's process record) to see whether the target actually handles the
+signal. The handler exists only for the
 duration of a request, so this single check catches all of: the extension is
 not loaded, the target is a build that cannot serve a dump, or the worker is
 idle.
@@ -264,8 +270,8 @@ $ echo $?
 1
 ```
 
-`--force` skips the check. On a system without `/proc` the check is impossible,
-so only the default `SIGURG` is sent without it.
+`--force` skips the check. On a system where the check is impossible (no
+`/proc`, and not macOS), only the default `SIGURG` is sent without it.
 
 `--force` does not, however, make the trigger send a signal whose default
 action would terminate or stop a target that is known not to handle it — there
@@ -291,6 +297,9 @@ is no dump to be had that way, only a dead process.
   running, though — a dump big enough to outlast them will lose the worker.
 - **FPM's slowlog can swallow the signal.** It uses `ptrace` on the worker to
   collect a backtrace; a signal arriving in that window may be lost. Retry.
+- **Without `sigqueue()` (macOS), concurrent requests are not told apart.** Two
+  triggers asking the same process at the same moment may be handed the same
+  file. Requests made one after the other always get separate dumps.
 - **The analyzer needs memory for large dumps**, roughly a kilobyte per item:
   ```bash
   $ php -d memory_limit=-1 analyzer/bin/analyzer summary /tmp/meminfo-....json
@@ -305,8 +314,13 @@ addresses — everything the request had in memory. Treat it as sensitive:
 - The temporary file is opened with `O_EXCL | O_NOFOLLOW`, so a symlink or a
   leftover file at that path is never written through or into; the attempt is
   recorded in the target's error log.
-- The returned path is verified to be a regular file owned by the target before
-  it is handed back.
+- The returned path is verified to be a regular file with a single link, owned
+  by the user the target runs as, before it is handed back. The owner comes from
+  `/proc` or, on macOS, from the kernel's process record; where it cannot be
+  determined only files of the calling user are accepted, and none when the
+  caller is root. Without `sigqueue()`, files of the expected shape that fail
+  this check, or are timestamped before the request or in the future, are
+  skipped rather than returned.
 - Requesting a dump needs permission to signal the target: the same user, or
   root. Reading the result across mount namespaces additionally needs
   `CAP_SYS_PTRACE`.

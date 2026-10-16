@@ -6,7 +6,7 @@ Check that meminfo_dump_process() dumps another running process
     if (DIRECTORY_SEPARATOR === '\\') die('skip signal dumps are POSIX only');
     if (!function_exists('proc_open')) die('skip proc_open() is required');
     if (!function_exists('meminfo_dump_process')) die('skip meminfo_dump_process() is not available');
-    if (!file_exists('/proc/self/status')) die('skip /proc is required to find the target');
+    if (!file_exists('/proc/self/status') && PHP_OS !== 'Darwin') die('skip /proc or macOS is required to find the target');
     // The target is spawned from this same PHP, so it has to be a build that
     // can serve a dump. Refusing a target that cannot is covered by
     // dump-signal_not_handled.phpt instead.
@@ -119,7 +119,7 @@ CODE;
         }
 
         echo "target still running: ",
-            file_exists('/proc/' . $pid . '/status') ? 'yes' : 'no', "\n";
+            meminfo_test_process_exists($pid) ? 'yes' : 'no', "\n";
         echo "target wrote nothing to stdout: ",
             filesize($child['stdout']) === 0 ? 'yes' : 'no', "\n";
     }

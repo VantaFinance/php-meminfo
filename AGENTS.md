@@ -39,7 +39,7 @@ analyzer/                     standalone PHP CLI application (PSR-4, BitOne\ nam
     Console/                  Application + Console/Command/ presentation layer
   spec/                       phpspec specs, mirroring src/ paths
 doc/                          usage guides and example scripts
-.github/workflows/            CI: build extension + run both test suites on PHP 7.0–8.1
+.github/workflows/            CI: build extension + run both test suites on PHP 7.0–8.1 (Linux), plus PHP 8.1 on macOS and on Linux without sigqueue()
 Dockerfile                    builds + enables the extension for a given PHP_VERSION (image meminfo:php-X.Y)
 .dockerignore                 keeps host build artifacts and vendor/ out of the Docker build context
 tools/repro/protobuf/         repro image (meminfo + ext-protobuf, optional ext-grpc) and repro.php dump check

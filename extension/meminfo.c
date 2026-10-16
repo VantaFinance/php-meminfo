@@ -9,11 +9,17 @@
 #include <stdint.h>
 #include <string.h>
 #ifndef PHP_WIN32
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
+#ifdef __APPLE__
+// No /proc: the facts the trigger needs about the target come from sysctl.
+# include <sys/sysctl.h>
+# define MEMINFO_HAVE_KINFO_PROC 1
 #endif
 
 #include "ext/standard/info.h"
@@ -726,6 +732,16 @@ static void meminfo_interrupt_handler(zend_execute_data *execute_data)
 
         meminfo_dump_to_file(execute_data, dump_id);
 
+        // A request without an id that arrived during a dump without one is
+        // most likely a resend of the request just served, and serving it
+        // would write a second full dump nobody waits for. A trigger that sent
+        // it after this dump started rejects this file by its timestamp and
+        // asks again, so nothing is lost by dropping it. A request carrying an
+        // id names its own file and is always kept.
+        if (dump_id == 0 && MEMINFO_G(dump_requested) && MEMINFO_G(dump_id) == 0) {
+            MEMINFO_G(dump_requested) = 0;
+        }
+
         MEMINFO_G(dumping) = 0;
     }
 
@@ -921,13 +937,35 @@ static int meminfo_signal_is_harmless(int signal_number)
     }
 }
 
+#ifdef MEMINFO_HAVE_KINFO_PROC
+/**
+ * The kernel's record of a process, for systems without /proc.
+ *
+ * Readable for processes of other users without any privilege. Returns 0 when
+ * the process does not exist.
+ */
+static int meminfo_kinfo_proc(pid_t pid, struct kinfo_proc *out)
+{
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int) pid };
+    size_t size = sizeof(*out);
+
+    memset(out, 0, sizeof(*out));
+
+    if (sysctl(mib, 4, out, &size, NULL, 0) != 0 || size != sizeof(*out)) {
+        return 0;
+    }
+
+    return out->kp_proc.p_pid == pid;
+}
+#endif
+
 /**
  * Whether the target has a handler installed for this signal.
  *
  * This is the one cheap way to tell, from outside, that the target has meminfo
  * loaded *and* is currently inside a request — the handler only exists for the
  * duration of one. Returns 1 caught, 0 not caught, -1 when it cannot be known
- * (no /proc, as on macOS).
+ * (no /proc and no kernel process record to read it from).
  */
 static int meminfo_signal_is_caught(pid_t pid, int signal_number)
 {
@@ -943,6 +981,14 @@ static int meminfo_signal_is_caught(pid_t pid, int signal_number)
     snprintf(path, sizeof(path), "/proc/%d/status", (int) pid);
 
     if (meminfo_read_small_file(path, status, sizeof(status)) < 0) {
+#ifdef MEMINFO_HAVE_KINFO_PROC
+        struct kinfo_proc info;
+
+        // sigset_t is a 32-bit mask here, one bit per signal.
+        if (signal_number <= 32 && meminfo_kinfo_proc(pid, &info)) {
+            return ((unsigned long) info.kp_proc.p_sigcatch >> (signal_number - 1)) & 1UL ? 1 : 0;
+        }
+#endif
         return -1;
     }
 
@@ -966,6 +1012,15 @@ static int meminfo_process_uids(pid_t pid, uid_t *real_uid, uid_t *effective_uid
     snprintf(path, sizeof(path), "/proc/%d/status", (int) pid);
 
     if (meminfo_read_small_file(path, status, sizeof(status)) < 0) {
+#ifdef MEMINFO_HAVE_KINFO_PROC
+        struct kinfo_proc info;
+
+        if (meminfo_kinfo_proc(pid, &info)) {
+            *real_uid = info.kp_eproc.e_pcred.p_ruid;
+            *effective_uid = info.kp_eproc.e_ucred.cr_uid;
+            return 1;
+        }
+#endif
         return 0;
     }
 
@@ -981,7 +1036,9 @@ static int meminfo_process_uids(pid_t pid, uid_t *real_uid, uid_t *effective_uid
 }
 
 /**
- * Start time of a process, in clock ticks since boot.
+ * Start time of a process: clock ticks since boot from /proc, or microseconds
+ * since the epoch from the kernel process record. Only ever compared with
+ * itself.
  *
  * Used to notice that the pid has been reused by a different process while the
  * trigger was waiting, which would otherwise look like a dump that never
@@ -997,6 +1054,15 @@ static int meminfo_process_start_time(pid_t pid, unsigned long long *out)
     snprintf(path, sizeof(path), "/proc/%d/stat", (int) pid);
 
     if (meminfo_read_small_file(path, buffer, sizeof(buffer)) < 0) {
+#ifdef MEMINFO_HAVE_KINFO_PROC
+        struct kinfo_proc info;
+
+        if (meminfo_kinfo_proc(pid, &info)) {
+            *out = (unsigned long long) info.kp_proc.p_starttime.tv_sec * 1000000ULL
+                + (unsigned long long) info.kp_proc.p_starttime.tv_usec;
+            return 1;
+        }
+#endif
         return 0;
     }
 
@@ -1030,6 +1096,7 @@ static int meminfo_process_start_time(pid_t pid, unsigned long long *out)
     return 1;
 }
 
+#ifdef HAVE_SIGQUEUE
 /**
  * A non-zero 31-bit id naming this dump request.
  *
@@ -1066,17 +1133,21 @@ static int meminfo_random_dump_id(void)
 
     return id == 0 ? 1 : id;
 }
+#endif
 
 /**
  * Check that a path really is the dump the target wrote.
  *
  * O_NOFOLLOW and the ownership check are what stop another user from parking a
  * symlink or a file of their own at the expected name and having it returned
- * as if it came from the target.
+ * as if it came from the target. A second link to a file the target owns is
+ * refused as well: without protected_hardlinks (macOS has none) anyone can
+ * create one, and it would make any file of that owner look like a dump.
+ * O_NONBLOCK keeps a FIFO swapped in at that name from blocking the open.
  */
 static int meminfo_dump_file_is_trustworthy(const char *path, pid_t pid)
 {
-    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     struct stat info;
     uid_t real_uid = 0;
     uid_t effective_uid = 0;
@@ -1092,7 +1163,7 @@ static int meminfo_dump_file_is_trustworthy(const char *path, pid_t pid)
 
     close(fd);
 
-    if (!S_ISREG(info.st_mode)) {
+    if (!S_ISREG(info.st_mode) || info.st_nlink != 1) {
         return 0;
     }
 
@@ -1100,9 +1171,9 @@ static int meminfo_dump_file_is_trustworthy(const char *path, pid_t pid)
         return info.st_uid == real_uid || info.st_uid == effective_uid;
     }
 
-    // Without /proc, accept only our own files, or anything when running as
-    // root (which can read them all anyway).
-    return info.st_uid == geteuid() || geteuid() == 0;
+    // The target's owner is unknown. Our own files are safe to return; as root
+    // anything would pass, including a file another user planted, so refuse.
+    return geteuid() != 0 && info.st_uid == geteuid();
 }
 
 #endif /* !PHP_WIN32 */
@@ -1572,7 +1643,7 @@ static void meminfo_browse_zvals_from_symbol_table(meminfo_context *ctx, char *f
     HashPosition pos;
 
     zend_string *key;
-    zend_long index;
+    zend_ulong index;
 
     zend_hash_internal_pointer_reset_ex(p_symbol_table, &pos);
 
@@ -1787,6 +1858,9 @@ static void meminfo_hash_write_children(meminfo_context *ctx, HashTable *ht, zen
                 break;
             case HASH_KEY_IS_LONG:
                 meminfo_write_int(w, (int64_t) (zend_long) num_key);
+                break;
+            default:
+                // Unreachable while the entry exists; leaves an empty name.
                 break;
         }
 
@@ -2365,16 +2439,34 @@ void meminfo_build_frame_label(char* frame_label, int frame_label_len, zend_exec
  * through /proc/<pid>/root for the same user or for root with CAP_SYS_PTRACE.
  */
 typedef struct {
+    char dir[MAXPATHLEN];
     char final_path[MAXPATHLEN];
     char temp_path[MAXPATHLEN + 8];
     int usable;
 } meminfo_dump_location;
 
+/**
+ * Without an id (dump_id 0) the names are not known in advance: they are
+ * filled in by meminfo_find_pid_dump() on every look.
+ */
 static void meminfo_dump_location_init(meminfo_dump_location *location, const char *prefix, const char *dir, int dump_id)
 {
     int written;
 
     location->usable = 0;
+    location->final_path[0] = '\0';
+    location->temp_path[0] = '\0';
+
+    written = snprintf(location->dir, sizeof(location->dir), "%s%s", prefix, dir);
+
+    if (written <= 0 || (size_t) written >= sizeof(location->dir)) {
+        return;
+    }
+
+    if (dump_id == 0) {
+        location->usable = 1;
+        return;
+    }
 
     written = snprintf(location->final_path, sizeof(location->final_path),
         "%s%s/meminfo-%d.json", prefix, dir, dump_id);
@@ -2392,6 +2484,151 @@ static void meminfo_dump_location_init(meminfo_dump_location *location, const ch
 
     location->usable = 1;
 }
+
+#ifndef HAVE_SIGQUEUE
+
+static int meminfo_timestamp_compare(long a_sec, long a_usec, long b_sec, long b_usec)
+{
+    if (a_sec != b_sec) {
+        return a_sec < b_sec ? -1 : 1;
+    }
+    if (a_usec != b_usec) {
+        return a_usec < b_usec ? -1 : 1;
+    }
+    return 0;
+}
+
+/**
+ * Whether a directory entry is named exactly meminfo-<pid>-<sec>-<usec>.json,
+ * or the same with .tmp, for this pid.
+ *
+ * The usec part is not zero-padded, so the timestamp is returned as numbers to
+ * be compared as such, never as text.
+ */
+static int meminfo_parse_pid_dump_name(const char *name, pid_t pid, long *sec, long *usec, int *is_temp)
+{
+    char prefix[32];
+    const char *cursor;
+    char *end;
+    int written = snprintf(prefix, sizeof(prefix), "meminfo-%d-", (int) pid);
+
+    if (written <= 0 || (size_t) written >= sizeof(prefix)
+        || strncmp(name, prefix, (size_t) written) != 0) {
+        return 0;
+    }
+
+    // Digits only: strtol would also take a sign or leading blanks.
+    cursor = name + written;
+    if (*cursor < '0' || *cursor > '9') {
+        return 0;
+    }
+
+    errno = 0;
+    *sec = strtol(cursor, &end, 10);
+    if (errno != 0 || *end != '-') {
+        return 0;
+    }
+
+    cursor = end + 1;
+    if (*cursor < '0' || *cursor > '9') {
+        return 0;
+    }
+
+    *usec = strtol(cursor, &end, 10);
+    if (errno != 0 || *usec >= 1000000) {
+        return 0;
+    }
+
+    if (strcmp(end, ".json") == 0) {
+        *is_temp = 0;
+    } else if (strcmp(end, ".json.tmp") == 0) {
+        *is_temp = 1;
+    } else {
+        return 0;
+    }
+
+    return 1;
+}
+
+/**
+ * Look for the dump a target wrote in answer to a plain kill().
+ *
+ * The target names it after its pid and the time the dump started, so only
+ * names timestamped between the request and now are considered: an earlier
+ * one is left over from a previous request, a later one cannot be genuine.
+ * Each candidate must pass the same ownership check as a named dump; one that
+ * does not is skipped rather than refused, so a file planted in a shared
+ * directory cannot block the request. The earliest finished dump and the
+ * earliest partial one are reported, either may be empty.
+ *
+ * Returns how many candidates were skipped as untrustworthy.
+ */
+static int meminfo_find_pid_dump(meminfo_dump_location *location, pid_t pid, const struct timeval *since)
+{
+    DIR *dir;
+    struct dirent *entry;
+    struct timeval now;
+    long best_sec[2] = { 0, 0 };
+    long best_usec[2] = { 0, 0 };
+    int untrusted = 0;
+
+    location->final_path[0] = '\0';
+    location->temp_path[0] = '\0';
+
+    dir = opendir(location->dir);
+    if (dir == NULL) {
+        return 0;
+    }
+
+    gettimeofday(&now, NULL);
+
+    while ((entry = readdir(dir)) != NULL) {
+        char path[MAXPATHLEN + 8];
+        char *best_path;
+        size_t best_size;
+        long sec;
+        long usec;
+        int is_temp;
+        int written;
+
+        if (!meminfo_parse_pid_dump_name(entry->d_name, pid, &sec, &usec, &is_temp)) {
+            continue;
+        }
+
+        if (meminfo_timestamp_compare(sec, usec, (long) since->tv_sec, (long) since->tv_usec) < 0
+            || meminfo_timestamp_compare(sec, usec, (long) now.tv_sec, (long) now.tv_usec) > 0) {
+            continue;
+        }
+
+        best_path = is_temp ? location->temp_path : location->final_path;
+        best_size = is_temp ? sizeof(location->temp_path) : sizeof(location->final_path);
+
+        if (best_path[0] != '\0'
+            && meminfo_timestamp_compare(sec, usec, best_sec[is_temp], best_usec[is_temp]) >= 0) {
+            continue;
+        }
+
+        written = snprintf(path, sizeof(path), "%s/%s", location->dir, entry->d_name);
+        if (written <= 0 || (size_t) written >= best_size) {
+            continue;
+        }
+
+        if (!meminfo_dump_file_is_trustworthy(path, pid)) {
+            untrusted++;
+            continue;
+        }
+
+        memcpy(best_path, path, (size_t) written + 1);
+        best_sec[is_temp] = sec;
+        best_usec[is_temp] = usec;
+    }
+
+    closedir(dir);
+
+    return untrusted;
+}
+
+#endif /* !HAVE_SIGQUEUE */
 
 /**
  * Ask a running process to dump its memory, and wait for the result.
@@ -2426,6 +2663,10 @@ PHP_FUNCTION(meminfo_dump_process)
     uint64_t last_growth;
     off_t last_size = -1;
     int temp_seen = 0;
+#ifndef HAVE_SIGQUEUE
+    struct timeval sent_at;
+    int untrusted = 0;
+#endif
 
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "l|a", &pid_arg, &options) == FAILURE) {
         return;
@@ -2561,16 +2802,25 @@ PHP_FUNCTION(meminfo_dump_process)
 
     /* --- where the dump will appear ------------------------------------ */
 
+#ifdef HAVE_SIGQUEUE
     dump_id = meminfo_random_dump_id();
+#else
+    // Cannot be delivered; the dump is looked for by pid and time instead.
+    dump_id = 0;
+#endif
 
     meminfo_dump_location_init(&locations[0], "", dir, dump_id);
 
+#ifdef __linux__
     if (snprintf(proc_root_prefix, sizeof(proc_root_prefix), "/proc/%d/root", (int) pid) > 0) {
         meminfo_dump_location_init(&locations[1], proc_root_prefix, dir, dump_id);
         if (locations[1].usable) {
             location_count = 2;
         }
     }
+#else
+    (void) proc_root_prefix;
+#endif
 
     if (!locations[0].usable) {
         zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0,
@@ -2596,8 +2846,11 @@ PHP_FUNCTION(meminfo_dump_process)
     }
 #else
     // Without sigqueue() the id cannot be delivered, so the target names the
-    // dump after its pid and the time instead. Nothing here can distinguish
-    // two concurrent requests, so the first matching file wins.
+    // dump after its pid and the time the dump started. Only a dump started
+    // after this moment can answer this request. Two requests running at the
+    // same time cannot be told apart and may be handed the same file.
+    gettimeofday(&sent_at, NULL);
+
     if (kill(pid, signal_number) != 0) {
         zend_throw_exception_ex(spl_ce_RuntimeException, 0,
             "meminfo_dump_process(): cannot signal process %d: %s",
@@ -2614,30 +2867,29 @@ PHP_FUNCTION(meminfo_dump_process)
 
     for (;;) {
         struct stat info;
+        int finished = -1;
 
-        // The finished dump, under either name.
+#ifndef HAVE_SIGQUEUE
+        untrusted = 0;
         for (i = 0; i < location_count; i++) {
-            if (locations[i].usable
-                && stat(locations[i].final_path, &info) == 0
-                && S_ISREG(info.st_mode)) {
-
-                if (!meminfo_dump_file_is_trustworthy(locations[i].final_path, pid)) {
-                    zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                        "meminfo_dump_process(): %s is not a regular file owned by process %d; "
-                        "refusing to use it",
-                        locations[i].final_path, (int) pid);
-                    return;
-                }
-
-                RETURN_STRING(locations[i].final_path);
+            if (locations[i].usable) {
+                untrusted += meminfo_find_pid_dump(&locations[i], pid, &sent_at);
             }
         }
+#endif
 
-        // A partial dump means the target is working; from here on the wait is
-        // bounded by progress rather than by the timeout, because a large heap
-        // on a slow disk can legitimately take minutes.
+        // The finished dump, under either name. Looked for after the partial
+        // one below would be wrong: a rename in between would make the dump
+        // look absent, and the request be sent again.
         for (i = 0; i < location_count; i++) {
-            if (locations[i].usable && stat(locations[i].temp_path, &info) == 0) {
+            if (locations[i].usable
+                && locations[i].temp_path[0] != '\0'
+                && stat(locations[i].temp_path, &info) == 0) {
+
+                // A partial dump means the target is working; from here on the
+                // wait is bounded by progress rather than by the timeout,
+                // because a large heap on a slow disk can legitimately take
+                // minutes.
                 temp_seen = 1;
 
                 if (info.st_size != last_size) {
@@ -2648,6 +2900,27 @@ PHP_FUNCTION(meminfo_dump_process)
             }
         }
 
+        for (i = 0; i < location_count && finished < 0; i++) {
+            if (locations[i].usable
+                && locations[i].final_path[0] != '\0'
+                && stat(locations[i].final_path, &info) == 0
+                && S_ISREG(info.st_mode)) {
+                finished = i;
+            }
+        }
+
+        if (finished >= 0) {
+            if (!meminfo_dump_file_is_trustworthy(locations[finished].final_path, pid)) {
+                zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+                    "meminfo_dump_process(): %s is not a regular file owned by process %d; "
+                    "refusing to use it",
+                    locations[finished].final_path, (int) pid);
+                return;
+            }
+
+            RETURN_STRING(locations[finished].final_path);
+        }
+
         if (temp_seen) {
             if (meminfo_now_usec() - last_growth > (uint64_t) timeout_seconds * 1000000ULL) {
                 zend_throw_exception_ex(spl_ce_RuntimeException, 0,
@@ -2656,6 +2929,16 @@ PHP_FUNCTION(meminfo_dump_process)
                 return;
             }
         } else if (meminfo_now_usec() - began > (uint64_t) timeout_seconds * 1000000ULL) {
+#ifndef HAVE_SIGQUEUE
+            if (untrusted > 0) {
+                zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+                    "meminfo_dump_process(): process %d did not start a dump within %ld seconds "
+                    "(%d matching file(s) in %s were ignored: not owned by the target, or not "
+                    "regular files with a single link)",
+                    (int) pid, (long) timeout_seconds, untrusted, locations[0].dir);
+                return;
+            }
+#endif
             zend_throw_exception_ex(spl_ce_RuntimeException, 0,
                 "meminfo_dump_process(): process %d did not start a dump within %ld seconds",
                 (int) pid, (long) timeout_seconds);
@@ -2695,8 +2978,9 @@ PHP_FUNCTION(meminfo_dump_process)
             }
 
             // Standard signals coalesce, so one sent while the target was busy
-            // may be the only one it ever sees; resending is harmless because
-            // the id — and therefore the file name — stays the same.
+            // may be the only one it ever sees, and one arriving between two
+            // requests is lost. With an id, resending is harmless: the file
+            // name stays the same and the target serves it once.
             if (meminfo_now_usec() - last_resend >= MEMINFO_RESEND_INTERVAL_USEC) {
 #ifdef HAVE_SIGQUEUE
                 union sigval value;
@@ -2705,7 +2989,21 @@ PHP_FUNCTION(meminfo_dump_process)
                 value.sival_int = dump_id;
                 sigqueue(pid, signal_number, value);
 #else
-                kill(pid, signal_number);
+                // Without one, every signal served is a separate dump, so look
+                // once more right before asking again: the dump may have
+                // started since the last look.
+                int pending = 0;
+
+                for (i = 0; i < location_count; i++) {
+                    if (locations[i].usable) {
+                        meminfo_find_pid_dump(&locations[i], pid, &sent_at);
+                        pending |= locations[i].temp_path[0] != '\0' || locations[i].final_path[0] != '\0';
+                    }
+                }
+
+                if (!pending) {
+                    kill(pid, signal_number);
+                }
 #endif
                 last_resend = meminfo_now_usec();
             }
@@ -2718,7 +3016,7 @@ failed_remove_partial:
     // Reached with an exception already pending; the partial dump the target
     // left behind is of no use to anyone and is removed before unwinding.
     for (i = 0; i < location_count; i++) {
-        if (locations[i].usable) {
+        if (locations[i].usable && locations[i].temp_path[0] != '\0') {
             unlink(locations[i].temp_path);
         }
     }

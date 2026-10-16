@@ -4,11 +4,23 @@ on: push
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         php-versions: ['7.0', '7.1', '7.2', '7.3', '7.4', '8.0', '8.1']
+        sigqueue: ['yes']
+        os: ['ubuntu-22.04']
+        include:
+          # Built as if sigqueue() did not exist, which is the macOS situation:
+          # the target names its dump after its pid and the trigger has to find it.
+          - php-versions: '8.1'
+            sigqueue: 'no'
+            os: 'ubuntu-22.04'
+          # The real thing: no sigqueue(), no /proc; process facts come from sysctl.
+          - php-versions: '8.1'
+            sigqueue: 'yes'
+            os: 'macos-latest'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,8 +36,17 @@ jobs:
         run: |
           cd extension/
           phpize
+          if [ "${{ matrix.sigqueue }}" = "no" ]; then
+            export ac_cv_func_sigqueue=no
+          fi
           ./configure
           make
+
+      # On macOS sigqueue() is absent by itself; the check proves the kill path is the one tested.
+      - name: Check that sigqueue() is disabled
+        if: matrix.sigqueue == 'no' || runner.os == 'macOS'
+        run: |
+          ! grep -q '^#define HAVE_SIGQUEUE' extension/config.h
 
       # run-tests.php from PHP 7 does not pick up the freshly built module on its
       # own, so the extension is passed explicitly. make test works on PHP 8.
@@ -54,7 +75,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: ext-tests-output-php-${{ matrix.php-versions }}
+          name: ext-tests-output-${{ matrix.os }}-php-${{ matrix.php-versions }}-sigqueue-${{ matrix.sigqueue }}
           path: |
             extension/tests/*.out
             extension/tests/*.diff

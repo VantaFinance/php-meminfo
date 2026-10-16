@@ -5,7 +5,7 @@ Check that a target which does not handle the dump signal is refused, not killed
     if (DIRECTORY_SEPARATOR === '\\') die('skip signal dumps are POSIX only');
     if (!function_exists('proc_open')) die('skip proc_open() is required');
     if (!function_exists('meminfo_dump_process')) die('skip meminfo_dump_process() is not available');
-    if (!file_exists('/proc/self/status')) die('skip /proc is required for the handled-signal check');
+    if (!file_exists('/proc/self/status') && PHP_OS !== 'Darwin') die('skip /proc or macOS is required for the handled-signal check');
 ?>
 --FILE--
 <?php
@@ -49,7 +49,7 @@ CODE;
             ($thrown !== null && strpos($thrown->getMessage(), (string) $pid) !== false)
                 ? 'yes' : 'no', "\n";
         echo "refused without waiting: ", $elapsed < 2 ? 'yes' : 'no', "\n";
-        echo "target still alive: ", file_exists('/proc/' . $pid . '/status') ? 'yes' : 'no', "\n";
+        echo "target still alive: ", meminfo_test_process_exists($pid) ? 'yes' : 'no', "\n";
     }
 
     meminfo_test_cleanup($child, $pid);

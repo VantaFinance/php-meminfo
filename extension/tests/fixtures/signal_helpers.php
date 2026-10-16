@@ -319,13 +319,38 @@ function meminfo_test_signal_pid($pid, $signal)
 }
 
 /**
+ * Whether the extension can tell, from outside, if a process handles a signal
+ * and who owns it: through /proc, or the kernel process record on macOS.
+ *
+ * @return bool
+ */
+function meminfo_test_can_inspect_processes()
+{
+    return file_exists('/proc/self/status') || PHP_OS === 'Darwin';
+}
+
+/**
+ * Like kill(pid, 0): a zombie still counts as existing.
+ *
  * @param int $pid
  *
  * @return bool
  */
 function meminfo_test_process_exists($pid)
 {
-    return $pid > 0 && file_exists('/proc/' . (int) $pid . '/status');
+    if ($pid <= 0) {
+        return false;
+    }
+
+    if (function_exists('posix_kill')) {
+        return posix_kill((int) $pid, 0);
+    }
+
+    $exitCode = 1;
+    $output = array();
+    exec('kill -0 ' . (int) $pid . ' 2>/dev/null', $output, $exitCode);
+
+    return $exitCode === 0;
 }
 
 /**
