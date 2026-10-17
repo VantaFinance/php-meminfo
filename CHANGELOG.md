@@ -1,6 +1,7 @@
 # Unreleased
 
 ## Bug fixes
+ - Dumps no longer have blank lines and lines holding a lone comma: every item is now written with its fields one per line, an empty `children` as `{}`, and the document closes with consistent indentation. The JSON itself is unchanged — same keys, order and value types — so the analyzer, the browser UI and any `json_decode()` read old and new dumps alike; only tools that compare dumps as text see a difference. A dump with no items, which would have closed with an extra `}`, is now valid JSON too
  - `meminfo_dump()` no longer crashes on deeply nested structures. The traversal used to recurse once per level and overflowed the C stack above roughly 28 000 levels — and around 7 000 inside a `Fiber`, which has a smaller stack. A 200 000-level object chain or nested array now dumps normally
  - Dumping no longer leaves memory behind in the process being dumped. Reading an object's properties through `get_properties()` attached a property table to every object it touched, and walking the frames attached a symbol table to every frame: about 37 MB retained per 100 000 objects, and 1.3 KB per frame. Both are now read without building anything, so a dump retains nothing
  - A dump no longer fails near `memory_limit`. Its bookkeeping used to be allocated by the Zend allocator and added some 75 MB of transient peak per 100 000 objects, which hit the limit of the very process being investigated for memory use. All of it is now allocated outside the limit, and the process's resident size no longer stays at the dump's peak afterwards

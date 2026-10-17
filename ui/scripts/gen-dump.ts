@@ -90,9 +90,9 @@ class DumpWriter {
       if (root.symbol !== undefined) {
         text += `        "symbol_name" : "${root.symbol}",\n`
       }
-      text += `        "is_root" : true,\n        "frame" : "${root.frame}"\n`
+      text += `        "is_root" : true,\n        "frame" : "${root.frame}"`
     } else {
-      text += '        "is_root" : false\n'
+      text += '        "is_root" : false'
     }
     this.items++
     await this.w.write(text)
@@ -100,7 +100,6 @@ class DumpWriter {
 
   async scalar(address: string, type: string, size: number, root?: { symbol?: string; frame: string }): Promise<void> {
     await this.open(address, type, size, root)
-    await this.w.write('\n')
   }
 
   async array(address: string, children: Array<[string, string]>, root?: { symbol?: string; frame: string }): Promise<void> {
@@ -115,13 +114,14 @@ class DumpWriter {
 
   private children(children: Array<[string, string]>): string {
     this.edges += children.length
+    if (children.length === 0) return '        "children" : {}'
     const body = children.map(([name, child]) => `            "${name}":"${child}"`).join(',\n')
-    return '        "children" : {\n' + body + '\n        }\n'
+    return '        "children" : {\n' + body + '\n        }'
   }
 
   async end(): Promise<void> {
-    // Same closing the extension writes; it assumes at least one item.
-    await this.w.write('\n    }\n}\n}\n')
+    // Same closing the extension writes: the last item, if any, then "items" and the document.
+    await this.w.write((this.first ? '' : '\n    }\n') + '  }\n}\n')
   }
 }
 
