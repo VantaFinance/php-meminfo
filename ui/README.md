@@ -14,7 +14,7 @@ page. User-facing documentation is in the repository's README ("Analyzing a dump
 | `src/lib/components/` | `VirtualTable` (windowed, paged, height-capped), load/progress/recovery screens, `Inspector`, `AddressLink`, `views/` |
 | `src/lib/components/graph/` | The Graph view's drawing: `elements.ts` (result → Cytoscape elements, style, layout; pure, tested headless) and `GraphCanvas.svelte` (one Cytoscape instance, destroyed with the canvas) |
 | `scripts/gen-dump.ts` | Synthetic dumps with the extension's exact byte layout |
-| `tests/fixtures/` | Real dumps: `parity/` (also readable by the PHP analyzer, with `*.expected.json` baselines) and `ui-only/` (quirks the PHP analyzer cannot open) |
+| `tests/fixtures/` | Real dumps: `parity/` (also readable by the PHP analyzer, with `*.expected.json` baselines) and `ui-only/` (quirks the PHP analyzer cannot open). They are regenerated through the extension, so the layout of older extensions is covered by a dump kept inline in `parser.test.ts` |
 | `tests-e2e/` | Playwright: app flow, privacy, memory budget, crash recovery, graph |
 
 ## Commands

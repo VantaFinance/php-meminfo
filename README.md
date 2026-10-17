@@ -389,7 +389,8 @@ $ make ui-dev       # then open the printed URL and drop a dump on the page
 ```
 
 A build of `master` is published on GitHub Pages at <https://vantafinance.github.io/php-meminfo/> —
-the page is static and works the same way: the dump you open stays in your browser.
+the page is static and works the same way: the dump you open stays in your browser. Its start page
+also sums up installation, the settings below and how to take a dump, linking back here for details.
 
 Or build it once and serve `ui/dist` from any static host (`make ui-build`, then for example
 `python3 -m http.server -d ui/dist`). It must be served: opened from `file://`, Chromium and Safari

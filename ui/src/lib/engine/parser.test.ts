@@ -1,7 +1,10 @@
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { DumpParseError, DumpParser, parseDumpStream } from './parser'
 import type { DumpStore, ItemView } from './store'
+import { generateDump } from '../../../scripts/gen-dump.ts'
 
 const fixture = (name: string): Uint8Array =>
   new Uint8Array(readFileSync(new URL(`../../../tests/fixtures/${name}.json`, import.meta.url)))
@@ -191,6 +194,43 @@ describe('DumpParser on edge cases', () => {
     expect(store.item(0).children).toEqual([{ name: 'x', target: 1, targetAddress: '0x20' }])
     expect(store.item(1).size).toBe(16)
     expect(store.header.memory_usage).toBe(1)
+  })
+
+  it('reads the layout of older extensions the same as the current one', () => {
+    // Before the layout fix: lone comma lines, blank lines, empty children on
+    // three lines, a misindented close. Kept inline: fixtures get regenerated.
+    const older =
+      '{\n  "header" : {\n    "memory_usage" : 1\n  },\n  "items": {\n' +
+      '    "0x10" : {\n        "type" : "array",\n        "size" : "72",\n        "symbol_name" : "list",\n        "is_root" : true,\n        "frame" : "<GLOBAL>"\n,\n        "children" : {\n            "0":"0x20",\n            "1":"0x30"\n        }\n\n    },\n' +
+      '    "0x20" : {\n        "type" : "int",\n        "size" : "16",\n        "is_root" : false\n\n\n    },\n' +
+      '    "0x30" : {\n        "type" : "object",\n        "size" : "72",\n        "is_root" : false\n,\n        "class" : "Empty",\n        "object_handle" : "1",\n        "children" : {\n\n        }\n\n    }\n}\n}\n'
+    const current =
+      '{\n  "header" : {\n    "memory_usage" : 1\n  },\n  "items": {\n' +
+      '    "0x10" : {\n        "type" : "array",\n        "size" : "72",\n        "symbol_name" : "list",\n        "is_root" : true,\n        "frame" : "<GLOBAL>",\n        "children" : {\n            "0":"0x20",\n            "1":"0x30"\n        }\n    },\n' +
+      '    "0x20" : {\n        "type" : "int",\n        "size" : "16",\n        "is_root" : false\n    },\n' +
+      '    "0x30" : {\n        "type" : "object",\n        "size" : "72",\n        "is_root" : false,\n        "class" : "Empty",\n        "object_handle" : "1",\n        "children" : {}\n    }\n  }\n}\n'
+
+    const a = parseText(older)
+    const b = parseText(current)
+    expect(a.count).toBe(3)
+    expect(canonical(b)).toEqual(canonical(a))
+    expect(JSON.parse(current)).toEqual(JSON.parse(older))
+  })
+
+  it('generates dumps in the layout the extension writes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'meminfo-gen-'))
+    try {
+      const path = join(dir, 'dump.json')
+      await generateDump(path, { requests: 20, fanout: 2, dangling: false })
+      const text = readFileSync(path, 'utf8')
+
+      expect(text).not.toMatch(/\n[ ]*\n/)
+      expect(text).not.toMatch(/^[ ]*,$/m)
+      expect(text.endsWith('    }\n  }\n}\n')).toBe(true)
+      expect(parseText(text).count).toBe(Object.keys((JSON.parse(text) as { items: object }).items).length)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('reads an empty dump', () => {

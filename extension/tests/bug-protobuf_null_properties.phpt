@@ -25,8 +25,12 @@ Check that objects whose get_properties handler returns NULL (ext-protobuf) prod
     meminfo_dump($dump);
 
     rewind($dump);
-    $meminfoData = json_decode(stream_get_contents($dump), true);
+    $text = stream_get_contents($dump);
+    $meminfoData = json_decode($text, true);
     fclose($dump);
+
+    // The empty children of these objects are written by a line of their own.
+    echo "blank lines: ", preg_match_all('/\n[ ]*\n/', $text), "\n";
 
     if (is_array($meminfoData)) {
         echo "meminfo_dump JSON decode ok\n";
@@ -52,6 +56,7 @@ Check that objects whose get_properties handler returns NULL (ext-protobuf) prod
     echo implode("\n", $classes)."\n";
 ?>
 --EXPECT--
+blank lines: 0
 meminfo_dump JSON decode ok
 Google\Protobuf\ListValue: empty children
 Google\Protobuf\MapField: empty children

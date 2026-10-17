@@ -1617,8 +1617,12 @@ void meminfo_dump_to_writer(meminfo_writer *w, zend_execute_data *start_frame, i
 
     meminfo_browse_class_static_members(&ctx);
 
-    MEMINFO_WRITE_LIT(w, "\n    }\n");
-    MEMINFO_WRITE_LIT(w, "}\n}\n");
+    // Every item leaves its body open without a trailing newline: close the
+    // last one here, if there was one, then "items" and the document.
+    if (! ctx.first_element) {
+        MEMINFO_WRITE_LIT(w, "\n    }\n");
+    }
+    MEMINFO_WRITE_LIT(w, "  }\n}\n");
 
     meminfo_writer_flush(w);
 
@@ -1916,6 +1920,9 @@ static const void *meminfo_child_identity(zval *value)
 
 /**
  * Begin one entry of a "children" block, up to the opening quote of its name.
+ *
+ * The block is opened as `"children" : {` with no newline, so the first entry
+ * starts its own line and the next ones are preceded by a comma.
  */
 static void meminfo_child_entry_open(meminfo_context *ctx, int *first_child)
 {
@@ -1924,6 +1931,7 @@ static void meminfo_child_entry_open(meminfo_context *ctx, int *first_child)
     if (!*first_child) {
         MEMINFO_WRITE_LIT(w, ",\n");
     } else {
+        MEMINFO_WRITE_LIT(w, "\n");
         *first_child = 0;
     }
 
@@ -1943,6 +1951,20 @@ static void meminfo_child_entry_close(meminfo_context *ctx, const void *child)
     MEMINFO_WRITE_LIT(w, "\"");
 }
 
+/**
+ * Close a "children" block: on its own line after entries, `{}` when empty.
+ */
+static void meminfo_children_close(meminfo_context *ctx, int first_child)
+{
+    meminfo_writer *w = ctx->w;
+
+    if (first_child) {
+        MEMINFO_WRITE_LIT(w, "}");
+    } else {
+        MEMINFO_WRITE_LIT(w, "\n        }");
+    }
+}
+
 static void meminfo_hash_write_children(meminfo_context *ctx, HashTable *ht, zend_bool is_object)
 {
     meminfo_writer *w = ctx->w;
@@ -1954,7 +1976,7 @@ static void meminfo_hash_write_children(meminfo_context *ctx, HashTable *ht, zen
 
     int first_child = 1;
 
-    MEMINFO_WRITE_LIT(w, "        \"children\" : {\n");
+    MEMINFO_WRITE_LIT(w, "        \"children\" : {");
 
     zend_hash_internal_pointer_reset_ex(ht, &pos);
     while ((entry = zend_hash_get_current_data_ex(ht, &pos)) != NULL) {
@@ -1988,7 +2010,7 @@ static void meminfo_hash_write_children(meminfo_context *ctx, HashTable *ht, zen
 
         zend_hash_move_forward_ex(ht, &pos);
     }
-    MEMINFO_WRITE_LIT(w, "\n        }\n");
+    meminfo_children_close(ctx, first_child);
 }
 
 /**
@@ -2170,7 +2192,7 @@ static void meminfo_slots_write_children(meminfo_context *ctx, meminfo_prop_slot
     uint32_t i;
     int first_child = 1;
 
-    MEMINFO_WRITE_LIT(w, "        \"children\" : {\n");
+    MEMINFO_WRITE_LIT(w, "        \"children\" : {");
 
     for (i = 0; i < count; i++) {
         const void *child = meminfo_child_identity(slots[i].value);
@@ -2184,7 +2206,7 @@ static void meminfo_slots_write_children(meminfo_context *ctx, meminfo_prop_slot
         meminfo_child_entry_close(ctx, child);
     }
 
-    MEMINFO_WRITE_LIT(w, "\n        }\n");
+    meminfo_children_close(ctx, first_child);
 }
 
 
@@ -2263,9 +2285,9 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, zend_strin
 
         MEMINFO_WRITE_LIT(w, "        \"is_root\" : true,\n        \"frame\" : \"");
         meminfo_write_json_escaped(w, frame_label);
-        MEMINFO_WRITE_LIT(w, "\"\n");
+        MEMINFO_WRITE_LIT(w, "\"");
     } else {
-        MEMINFO_WRITE_LIT(w, "        \"is_root\" : false\n");
+        MEMINFO_WRITE_LIT(w, "        \"is_root\" : false");
     }
 
     if (Z_TYPE_P(zv) == IS_OBJECT) {
@@ -2297,7 +2319,7 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, zend_strin
                 level->slot_count = slot_count;
             } else {
                 ctx->aborted = 1;
-                MEMINFO_WRITE_LIT(w, "        \"children\" : {\n        }\n");
+                MEMINFO_WRITE_LIT(w, "        \"children\" : {}");
             }
         } else {
 #if PHP_VERSION_ID >= 80000
@@ -2329,7 +2351,7 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, zend_strin
             } else {
                 // Some internal classes (e.g. ext-protobuf messages) return NULL from get_properties:
                 // an empty children list closes the item after the trailing comma above
-                MEMINFO_WRITE_LIT(w, "        \"children\" : {\n        }\n");
+                MEMINFO_WRITE_LIT(w, "        \"children\" : {}");
             }
         }
 #if PHP_VERSION_ID >= 80100
@@ -2347,8 +2369,6 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, zend_strin
 
         level->ht = Z_ARRVAL_P(zv);
         zend_hash_internal_pointer_reset_ex(level->ht, &level->pos);
-    } else {
-        MEMINFO_WRITE_LIT(w, "\n");
     }
 
     return 1;
