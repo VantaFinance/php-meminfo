@@ -242,6 +242,46 @@ ide: docker-build ## Extract PHP headers for CLion (usage: make ide PHP_VERSION=
 ide-clean: ## Remove the PHP headers extracted for the IDE
 	rm -rf $(IDE_DIR)
 
+##@ Browser UI
+
+# The UI is a separate Node project (Node 24+). `check` and `ci` above stay
+# PHP-only, so PHP contributors never need Node.
+UI_DIR ?= ui
+NPM    ?= npm
+
+.PHONY: ui-install
+ui-install: ## Install the browser UI's dependencies (Node 24+)
+	$(NPM) --prefix $(UI_DIR) ci
+
+.PHONY: ui-dev
+ui-dev: ## Run the browser UI on a local dev server
+	$(NPM) --prefix $(UI_DIR) run dev
+
+.PHONY: ui-build
+ui-build: ## Build the browser UI into ui/dist (serve it; file:// does not work)
+	$(NPM) --prefix $(UI_DIR) run build
+
+.PHONY: ui-check
+ui-check: ## Type-check the browser UI (svelte-check + tsc)
+	$(NPM) --prefix $(UI_DIR) run check
+
+.PHONY: ui-test
+ui-test: ## Run the browser UI's engine tests (Vitest)
+	$(NPM) --prefix $(UI_DIR) test
+
+.PHONY: ui-e2e
+ui-e2e: ## Run the browser UI's end-to-end and memory tests (Playwright, Chromium)
+	$(NPM) --prefix $(UI_DIR) run test:e2e
+
+.PHONY: ui-fixtures
+ui-fixtures: ## Regenerate the UI's dump fixtures and analyzer baselines (needs PHP 8.1+ with meminfo, and make install)
+	$(PHP) $(UI_DIR)/tests/fixtures/make-fixtures.php
+	$(PHP) $(UI_DIR)/tests/fixtures/analyzer-baseline.php
+
+.PHONY: clean-ui
+clean-ui: ## Remove the browser UI's dependencies, build and generated test dumps
+	rm -rf $(UI_DIR)/node_modules $(UI_DIR)/dist $(UI_DIR)/tests-e2e/.generated $(UI_DIR)/test-results $(UI_DIR)/playwright-report
+
 ##@ Cleanup
 
 .PHONY: clean-ext
@@ -259,14 +299,14 @@ clean-analyzer: ## Remove analyzer dependencies
 	rm -rf $(ANA_DIR)/vendor
 
 .PHONY: clean
-clean: clean-ext clean-analyzer ## Remove all build artifacts and dependencies
+clean: clean-ext clean-analyzer clean-ui ## Remove all build artifacts and dependencies
 
 ##@ Help
 
 .PHONY: help
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage:\n  make \033[36m<target>\033[0m\n"} \
-		/^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2} \
+		/^[a-zA-Z0-9_-]+:.*?## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2} \
 		/^##@/ {printf "\n\033[1m%s\033[0m\n", substr($$0, 5)}' $(MAKEFILE_LIST)
 
 # ARGS is optional (used by the analyzer target) — declare it so that

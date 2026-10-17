@@ -1,0 +1,229 @@
+{
+    "fixture": "leak-before.json",
+    "items": 400,
+    "summary": [
+        {
+            "type": "string",
+            "count": 230,
+            "self_size": 9725
+        },
+        {
+            "type": "array",
+            "count": 60,
+            "self_size": 4320
+        },
+        {
+            "type": "int",
+            "count": 55,
+            "self_size": 880
+        },
+        {
+            "type": "Request",
+            "count": 50,
+            "self_size": 3600
+        },
+        {
+            "type": "null",
+            "count": 4,
+            "self_size": 64
+        },
+        {
+            "type": "float",
+            "count": 1,
+            "self_size": 16
+        }
+    ],
+    "topChildren": [
+        {
+            "id": "0x106a5c2c0",
+            "children": 60
+        },
+        {
+            "id": "0x106a630e0",
+            "children": 50
+        },
+        {
+            "id": "0x106a19590",
+            "children": 10
+        },
+        {
+            "id": "0x106a19070",
+            "children": 7
+        },
+        {
+            "id": "0x106a190f0",
+            "children": 3
+        },
+        {
+            "id": "0x106a5d340",
+            "children": 3
+        },
+        {
+            "id": "0x106a04060",
+            "children": 3
+        },
+        {
+            "id": "0x106a041e0",
+            "children": 3
+        },
+        {
+            "id": "0x106a042a0",
+            "children": 3
+        },
+        {
+            "id": "0x106a04360",
+            "children": 3
+        },
+        {
+            "id": "0x106a04420",
+            "children": 3
+        },
+        {
+            "id": "0x106a044e0",
+            "children": 3
+        },
+        {
+            "id": "0x106a045a0",
+            "children": 3
+        },
+        {
+            "id": "0x106a04660",
+            "children": 3
+        },
+        {
+            "id": "0x106a04720",
+            "children": 3
+        },
+        {
+            "id": "0x106a047e0",
+            "children": 3
+        },
+        {
+            "id": "0x106a048a0",
+            "children": 3
+        },
+        {
+            "id": "0x106a04960",
+            "children": 3
+        },
+        {
+            "id": "0x106a04a20",
+            "children": 3
+        },
+        {
+            "id": "0x106a04ae0",
+            "children": 3
+        }
+    ],
+    "queries": [
+        {
+            "name": "roots",
+            "filters": {
+                "is_root": {
+                    "operator": "=",
+                    "value": 1
+                }
+            },
+            "limit": 10,
+            "ids": [
+                "0x106a19560",
+                "0x106a19570",
+                "0x106a19580",
+                "0x106a19590",
+                "0x106a194f0",
+                "0x106a5c200",
+                "0x106a5c220",
+                "0x106a5c240",
+                "0x106a5c260",
+                "0x106a190f0"
+            ]
+        },
+        {
+            "name": "strings",
+            "filters": {
+                "type": {
+                    "operator": "=",
+                    "value": "string"
+                }
+            },
+            "limit": 10,
+            "ids": [
+                "0x106a19560",
+                "0x106a70b88",
+                "0x106a70b98",
+                "0x106a70ba8",
+                "0x106a70bb8",
+                "0x106a70bc8",
+                "0x106a70bd8",
+                "0x106a70be8",
+                "0x106a70bf8",
+                "0x106a70c08"
+            ]
+        },
+        {
+            "name": "request objects",
+            "filters": {
+                "class": {
+                    "operator": "=",
+                    "value": "Request"
+                },
+                "is_root": {
+                    "operator": "=",
+                    "value": 0
+                }
+            },
+            "limit": 10,
+            "ids": [
+                "0x106a04060",
+                "0x106a041e0",
+                "0x106a042a0",
+                "0x106a04360",
+                "0x106a04420",
+                "0x106a044e0",
+                "0x106a045a0",
+                "0x106a04660",
+                "0x106a04720",
+                "0x106a047e0"
+            ]
+        },
+        {
+            "name": "class regex",
+            "filters": {
+                "class": {
+                    "operator": "~",
+                    "value": "^(Child|Base|Registry)$"
+                }
+            },
+            "limit": 10,
+            "ids": []
+        }
+    ],
+    "referencePaths": [
+        {
+            "label": "Request",
+            "target": "0x106a04060",
+            "paths": [
+                {
+                    "root": "0x106a630e0",
+                    "length": 1,
+                    "names": [
+                        "0"
+                    ]
+                }
+            ]
+        },
+        {
+            "label": "<first root>",
+            "target": "0x106a19560",
+            "paths": [
+                {
+                    "root": "0x106a19560",
+                    "length": 1,
+                    "names": [
+                        "<self>"
+                    ]
+                }
+            ]
+        }
+    ]
+}

@@ -7,18 +7,20 @@
 ## Project Overview
 
 PHP Meminfo is a PHP extension that dumps the content of PHP memory as JSON, plus a PHP CLI
-analyzer that inspects those dumps to help track down memory leaks.
+analyzer that inspects those dumps to help track down memory leaks, plus a browser UI that analyzes
+the same dumps entirely client-side.
 
 ## Tech Stack
 
-- **Programming language:** C (extension, Zend Engine API) and PHP (analyzer)
-- **Framework:** none — the analyzer uses Symfony Console as a library (`^3.4 || ^4.4 || ^5.0`)
+- **Programming language:** C (extension, Zend Engine API), PHP (analyzer), TypeScript (browser UI)
+- **Framework:** none — the analyzer uses Symfony Console as a library (`^3.4 || ^4.4 || ^5.0`);
+  the UI is Svelte 5 on Vite (no SvelteKit, no backend)
 - **Database:** none — the persistence format is a JSON dump file
 - **ORM:** not applicable
 - **Build:** `phpize` + `config.m4` for the extension, Composer for the analyzer; optional Docker
   build (`Dockerfile`, `php:<version>-cli-alpine`) selected by `PHP_VERSION`; `CMakeLists.txt` is
   IDE-only (CLion code insight), never used to build the extension
-- **Testing:** `.phpt` (extension), phpspec (analyzer)
+- **Testing:** `.phpt` (extension), phpspec (analyzer), Vitest + Playwright (UI)
 - **Supported PHP:** 7.0 – 8.1 (CI matrix)
 
 ## Project Structure
@@ -38,10 +40,20 @@ analyzer/                     standalone PHP CLI application (PSR-4, BitOne\ nam
     Analyzer/                 all analysis logic — the layer covered by specs
     Console/                  Application + Console/Command/ presentation layer
   spec/                       phpspec specs, mirroring src/ paths
+ui/                           browser UI (TypeScript + Svelte 5 + Vite); dumps are parsed in a Web Worker
+  src/lib/engine/             pure TS, no DOM: streaming parser, columnar store, analyses (Vitest)
+    analyses/                 summary, top children, query, reference paths, dominators, suspects, diff, subgraph
+  src/lib/worker/             worker protocol, DumpSession, dump.worker.ts, page-side DumpClient
+  src/lib/components/         Svelte components; views/ holds one component per screen
+    graph/                    Graph view drawing: Cytoscape elements/style/layout + GraphCanvas (lazy chunk)
+  src/lib/state/              app state on Svelte 5 runes ($state.raw for everything from the worker)
+  scripts/gen-dump.ts         synthetic dump generator with the extension's exact byte layout
+  tests/fixtures/             real dumps (parity/ and ui-only/), make-fixtures.php, analyzer-baseline.php
+  tests-e2e/                  Playwright: app flow, privacy, memory budget, crash recovery
 doc/                          usage guides and example scripts
-.github/workflows/            CI: build extension + run both test suites on PHP 7.0–8.1 (Linux), plus PHP 8.1 on macOS and on Linux without sigqueue()
+.github/workflows/            CI: build extension + run both test suites on PHP 7.0–8.1 (Linux), plus PHP 8.1 on macOS and on Linux without sigqueue(); ui.yaml tests the UI and deploys it to GitHub Pages from master
 Dockerfile                    builds + enables the extension for a given PHP_VERSION (image meminfo:php-X.Y)
-.dockerignore                 keeps host build artifacts and vendor/ out of the Docker build context
+.dockerignore                 keeps host build artifacts, vendor/ and ui/ out of the Docker build context
 tools/repro/protobuf/         repro image (meminfo + ext-protobuf, optional ext-grpc) and repro.php dump check
 tools/repro/memory/           probes for what a dump costs the dumped process: memory, speed, deep structures, signal path, target-side file hardening
 CMakeLists.txt                IDE-only CLion project model over extension/ (Zend headers from .ide/)
@@ -66,11 +78,16 @@ reverse. Commands stay thin; analysis logic belongs in `Analyzer/*` so it can be
 | `analyzer/src/BitOne/PhpMemInfo/Console/Application.php` | Registers the console commands |
 | `analyzer/src/BitOne/PhpMemInfo/Loader.php` | Single reader of dump files |
 | `analyzer/composer.json` | Analyzer dependencies and PSR-4 autoloading |
-| `.github/workflows/build.yaml` | CI matrix and test invocations |
+| `ui/src/lib/engine/parser.ts` | The UI's only reader of dump files: streaming tokenizer into the columnar `DumpStore` |
+| `ui/src/lib/worker/session.ts` | Everything one dump worker answers; `dump.worker.ts` wires it to messages |
+| `ui/src/App.svelte` | UI shell: load flow, navigation, views, inspector |
+| `.github/workflows/build.yaml` | CI matrix and test invocations for the extension and the analyzer |
+| `.github/workflows/ui.yaml` | UI checks, unit and e2e tests; on master, publishes the tested `ui/dist` to GitHub Pages |
 
 ## Common Commands
 
-The root `Makefile` wraps both halves of the project. Run `make help` for the full list.
+The root `Makefile` wraps the whole project. Run `make help` for the full list. `check` and `ci`
+cover the PHP side only; the UI has its own `ui-*` targets (Node 24+).
 
 ```bash
 make build          # build the extension (phpize + configure + make, as needed)
@@ -94,6 +111,13 @@ make repro-test     # .phpt suite with ext-protobuf loaded (runs the protobuf-on
 tools/repro/memory/compare.sh 8.1   # measure a dump's cost against a baseline revision (see its README)
 make ide PHP_VERSION=7.4   # extract PHP 7.4 headers into .ide/php-7.4 for CLion
 make ide-clean      # remove extracted headers
+make ui-install     # npm ci in ui/
+make ui-dev         # UI dev server
+make ui-build       # static build in ui/dist (serve it; file:// does not work in Chromium/Safari)
+make ui-check       # svelte-check + tsc
+make ui-test        # engine tests (Vitest)
+make ui-e2e         # end-to-end, privacy and memory tests (Playwright, Chromium)
+make ui-fixtures    # regenerate UI fixtures + PHP analyzer baselines (PHP 8.1+ with meminfo)
 ```
 
 Build against a specific PHP by overriding the toolchain variables:
@@ -139,7 +163,9 @@ cd analyzer && composer install && vendor/bin/phpspec run
 - Decompose shell commands instead of chaining them with `&&`, so each step's outcome is visible:
   - Incorrect: `git checkout master && git pull`
   - Correct: first `git checkout master`, then `git pull origin master`
-- The dump file format is a contract between `extension/` and `analyzer/`. A change on one side
-  requires the matching change, tests and specs on the other side in the same commit.
+- The dump file format is a contract between `extension/`, `analyzer/` and `ui/`. A change on one
+  side requires the matching change, tests and specs on the others in the same commit.
+- The UI must never hold a dump on the main thread, read it whole (`Blob.text()`, `JSON.parse`) or
+  send anything off the page; `ui-e2e` enforces the memory budget and the no-network rule.
 - All changes must keep the PHP 7.0 – 8.1 CI matrix green. Engine API differences are handled with
   `PHP_VERSION_ID` preprocessor guards, not runtime checks.

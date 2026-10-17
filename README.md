@@ -378,6 +378,52 @@ complete, so a `.json` file is always whole. A target killed mid-dump leaves its
 $ find /tmp -maxdepth 1 -name 'meminfo-*.json.tmp' -mtime +1 -delete
 ```
 
+## Analyzing a dump in the browser
+
+`ui/` is a browser app that opens a dump and points at the likely leak, with no backend: the file is
+read and analyzed in the browser and nothing is sent anywhere.
+
+```bash
+$ make ui-install   # once (Node 24+)
+$ make ui-dev       # then open the printed URL and drop a dump on the page
+```
+
+A build of `master` is published on GitHub Pages at <https://vantafinance.github.io/php-meminfo/> —
+the page is static and works the same way: the dump you open stays in your browser.
+
+Or build it once and serve `ui/dist` from any static host (`make ui-build`, then for example
+`python3 -m http.server -d ui/dist`). It must be served: opened from `file://`, Chromium and Safari
+refuse to run its module scripts.
+
+What it shows:
+
+- **Leak suspects** — what keeps the most memory alive: a dominator tree over everything reachable
+  from the roots, with the retained size of each item and of each class (counting only top-most
+  instances), and data shared by several roots flagged as such.
+- **Growth** — load an earlier dump of the same process as a baseline to see which types and classes
+  keep growing. Only the baseline's totals are kept, not a second dump.
+- **Summary**, **Top children** and **Search** — the same analyses as the CLI analyzer below
+  (checked against it in the tests).
+- An **inspector** for any item: what dominates it, every reference path from a root, its children
+  and what refers to it.
+- A **graph** of what keeps an item reachable: the shortest paths from every root that reaches it,
+  merged into one picture with the roots on the left and the item on the right, and the items every
+  path goes through highlighted — free one of those and the item goes. A neighbourhood mode draws
+  the items around one (its holders and what it holds, up to three hops); double-click any node to
+  bring in its neighbours, click it to inspect it. Every address in Search, Top children and the
+  inspector opens it, as does "Show graph" in the inspector. A graph is capped at 600 items, the
+  nearest roots first, so it stays readable; the app says when it cut one short.
+
+Large dumps are read as a stream in a Web Worker into compact typed arrays; the page itself holds
+only what is on screen. A 300 MB dump (2M items) opens in about 1.3 s with about 2 MB of JavaScript
+heap on the page. Chrome should hold dumps of about 15M items (~2.5 GB); larger ones, and the limits
+of other browsers, have not been measured — if a tab runs out of memory, the app says so after the
+reload. It also opens dumps that the PHP analyzer rejects because a key holds invalid UTF-8.
+
+Retained sizes are relative: item sizes are the extension's estimates, and an object that a
+function's local reached first appears without its later holders (a global or a static also
+holding it emits no item of its own).
+
 ## Displaying a summary of items in memory
 ```bash
 $ bin/analyzer summary <dump-file>
