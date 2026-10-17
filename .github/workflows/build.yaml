@@ -71,7 +71,6 @@ jobs:
             }
             exit(1);
           ')
-          php -n -d extension="$protobuf" -r 'exit(extension_loaded("protobuf") ? 0 : 1);'
           echo "PROTOBUF_SO=$protobuf" >> "$GITHUB_ENV"
 
       - name: Build the extension
@@ -105,19 +104,10 @@ jobs:
           cd extension/
           REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test TESTS="-d extension=$PROTOBUF_SO tests/" | tee run-tests.log
 
+      # A protobuf.so that fails to load makes the test skip, not fail.
       - name: Check that the protobuf test ran
         run: |
           grep -E '(PASS|FAIL).*bug-protobuf_null_properties' extension/run-tests.log
-
-      - name: Show failed extension tests
-        if: failure()
-        run: |
-          for diff in extension/tests/*.diff; do
-            [ -f "$diff" ] || continue
-            echo "::group::$diff"
-            cat "$diff"
-            echo "::endgroup::"
-          done
 
       - uses: actions/upload-artifact@v4
         if: failure()
