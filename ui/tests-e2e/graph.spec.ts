@@ -25,7 +25,7 @@ async function nodes(page: Page, selector: string): Promise<Node[]> {
   const box = (await canvas.boundingBox())!
   const found = await canvas.evaluate((element, wanted) => {
     const cy = (element as unknown as { _cyreg: { cy: import('cytoscape').Core } })._cyreg.cy
-    return cy.$(wanted).map((node) => ({ ...node.renderedPosition(), label: String(node.data('label')) }))
+    return cy.nodes(wanted).map((node) => ({ ...node.renderedPosition(), label: String(node.data('label')) }))
   }, selector)
   return found.map((node) => ({ x: box.x + node.x, y: box.y + node.y, label: node.label }))
 }
