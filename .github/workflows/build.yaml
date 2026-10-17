@@ -27,6 +27,7 @@ jobs:
 
       # ext-protobuf, so bug-protobuf_null_properties.phpt runs instead of skipping.
       # Each PECL line supports only some PHP versions: pick the newest that builds.
+      # On macOS a PECL build fails; the unversioned name gets setup-php's Homebrew bottle.
       - name: Pick the ext-protobuf version
         id: protobuf
         run: |
@@ -36,13 +37,17 @@ jobs:
             8.1) version=4.33.6 ;;
             *)   version=5.36.2 ;;
           esac
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            echo "extension=protobuf" >> "$GITHUB_OUTPUT"
+          else
+            echo "extension=protobuf-$version" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php-versions }}
-          extensions: posix, json, protobuf-${{ steps.protobuf.outputs.version }}
+          extensions: posix, json, ${{ steps.protobuf.outputs.extension }}
           coverage: none
 
       # run-tests.php of PHP 8 starts PHP with -n, so protobuf has to be loaded by
