@@ -25,12 +25,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ext-protobuf, so bug-protobuf_null_properties.phpt runs instead of skipping.
+      # Each PECL line supports only some PHP versions: pick the newest that builds.
+      - name: Pick the ext-protobuf version
+        id: protobuf
+        run: |
+          case "${{ matrix.php-versions }}" in
+            7.*) version=3.24.4 ;;
+            8.0) version=3.25.3 ;;
+            8.1) version=4.33.6 ;;
+            *)   version=5.36.2 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php-versions }}
-          extensions: posix, json
+          extensions: posix, json, protobuf-${{ steps.protobuf.outputs.version }}
           coverage: none
+
+      # run-tests.php starts PHP with -n, so protobuf has to be loaded by its full path.
+      - name: Locate ext-protobuf
+        run: |
+          protobuf="$(php-config --extension-dir)/protobuf.so"
+          php -n -d extension="$protobuf" -r 'exit(extension_loaded("protobuf") ? 0 : 1);'
+          echo "PROTOBUF_SO=$protobuf" >> "$GITHUB_ENV"
 
       - name: Build the extension
         run: |
@@ -54,13 +74,13 @@ jobs:
         if: startsWith(matrix.php-versions, '7.')
         run: |
           cd extension/
-          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 TEST_PHP_EXECUTABLE=$(which php) $(which php) run-tests.php -d extension=$PWD/modules/meminfo.so
+          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 TEST_PHP_EXECUTABLE=$(which php) $(which php) run-tests.php -d extension=$PWD/modules/meminfo.so -d extension="$PROTOBUF_SO"
 
       - name: Test the extension (PHP 8)
         if: startsWith(matrix.php-versions, '8.')
         run: |
           cd extension/
-          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test
+          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test TESTS="-d extension=$PROTOBUF_SO tests/"
 
       - name: Show failed extension tests
         if: failure()
