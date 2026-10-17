@@ -2,6 +2,9 @@
   import { formatBytes } from '../format'
   import { app } from '../state/app.svelte'
 
+  /** The README on GitHub holds the full reference; links only, nothing is fetched. */
+  const REPO = 'https://github.com/VantaFinance/php-meminfo'
+
   let input: HTMLInputElement | undefined = $state()
   let dragging = $state(false)
 
@@ -21,71 +24,156 @@
   }
 </script>
 
-<section class="panel">
-  <div class="intro">
-    <h1>PHP Meminfo</h1>
-    <p class="lead">Find what keeps memory alive in a PHP process, from a meminfo dump.</p>
-  </div>
-
-  {#if app.error}
-    <div class="notice danger" role="alert">
-      <strong>{app.error.fileName} could not be opened.</strong>
-      {app.error.message}
+<div class="page">
+  <section class="panel">
+    <div class="intro">
+      <h1>PHP Meminfo</h1>
+      <p class="lead">Find what keeps memory alive in a PHP process, from a meminfo dump.</p>
     </div>
-  {/if}
 
-  {#if app.pendingLarge}
-    <div class="notice warning" role="alert">
-      <p>
-        <strong>{app.pendingLarge.name}</strong> is {formatBytes(app.pendingLarge.size)} — more than this browser is
-        expected to hold (about 2.5 GB of dump in Chrome). Loading it may run out of memory.
-      </p>
-      <div class="actions">
-        <button type="button" class="button" onclick={() => app.pendingLarge && app.open(app.pendingLarge, true)}>Load anyway</button>
-        <button type="button" class="button quiet" onclick={() => (app.pendingLarge = null)}>Cancel</button>
+    {#if app.error}
+      <div class="notice danger" role="alert">
+        <strong>{app.error.fileName} could not be opened.</strong>
+        {app.error.message}
       </div>
+    {/if}
+
+    {#if app.pendingLarge}
+      <div class="notice warning" role="alert">
+        <p>
+          <strong>{app.pendingLarge.name}</strong> is {formatBytes(app.pendingLarge.size)} — more than this browser is
+          expected to hold (about 2.5 GB of dump in Chrome). Loading it may run out of memory.
+        </p>
+        <div class="actions">
+          <button type="button" class="button" onclick={() => app.pendingLarge && app.open(app.pendingLarge, true)}>Load anyway</button>
+          <button type="button" class="button quiet" onclick={() => (app.pendingLarge = null)}>Cancel</button>
+        </div>
+      </div>
+    {/if}
+
+    <div
+      class="drop"
+      class:dragging
+      role="region"
+      aria-label="Drop a dump file here"
+      ondragover={(event) => {
+        event.preventDefault()
+        dragging = true
+      }}
+      ondragleave={() => (dragging = false)}
+      ondrop={drop}
+    >
+      <p class="drop-title">Drop a dump file here</p>
+      <p class="drop-hint">or</p>
+      <button type="button" class="button primary" onclick={() => input?.click()}>Open dump…</button>
+      <input bind:this={input} class="visually-hidden" type="file" accept=".json,application/json" onchange={pick} />
+      <p class="privacy">The dump is read and analyzed in this browser. Nothing is uploaded.</p>
     </div>
-  {/if}
+  </section>
 
-  <div
-    class="drop"
-    class:dragging
-    role="region"
-    aria-label="Drop a dump file here"
-    ondragover={(event) => {
-      event.preventDefault()
-      dragging = true
-    }}
-    ondragleave={() => (dragging = false)}
-    ondrop={drop}
-  >
-    <p class="drop-title">Drop a dump file here</p>
-    <p class="drop-hint">or</p>
-    <button type="button" class="button primary" onclick={() => input?.click()}>Open dump…</button>
-    <input bind:this={input} class="visually-hidden" type="file" accept=".json,application/json" onchange={pick} />
-    <p class="privacy">The dump is read and analyzed in this browser. Nothing is uploaded.</p>
-  </div>
+  <div class="guide">
+    <section class="about" aria-labelledby="about-title">
+      <h2 id="about-title">What it is</h2>
+      <p>
+        <a href={REPO} rel="noreferrer">meminfo</a> is a PHP extension that writes everything a PHP process holds in
+        memory to a JSON file: each array, object and value, the variable or static it belongs to, and what refers to
+        what. This page reads such a dump and shows what keeps memory alive — the biggest retainers, what grew since an
+        earlier dump, and every path from a root to an item. The file is read by this browser and never leaves it.
+      </p>
+    </section>
 
-  <div class="howto">
-    <h2>Getting a dump</h2>
-    <p>From a running process, with the meminfo extension loaded:</p>
-    <pre><code>dump-meminfo &lt;pid&gt; --dir=/tmp</code></pre>
-    <p>From the application itself:</p>
-    <pre><code>meminfo_dump(fopen('/tmp/dump.json', 'w'));</code></pre>
-    <p class="tip">
-      To see what grows, take one dump, let the process run, take another, and compare them in the
-      <em>Growth</em> view.
-    </p>
+    <section class="install" aria-labelledby="install-title">
+      <h2 id="install-title">Install the extension</h2>
+      <p>Build it from the <code>extension</code> directory of the repository:</p>
+      <pre><code>phpize
+./configure --enable-meminfo
+make
+make install</code></pre>
+      <p>Then enable it in <code>php.ini</code>:</p>
+      <pre><code>extension=meminfo.so</code></pre>
+      <p>
+        PHP 7.0 – 8.5. Dumping another, running process needs the target to be PHP 7.1 or later, non-ZTS, on a POSIX
+        system.
+      </p>
+      <p class="more">
+        <a href="{REPO}#compilation" rel="noreferrer">Compilation</a> ·
+        <a href="{REPO}#enabling-the-extension" rel="noreferrer">Enabling the extension</a>
+      </p>
+    </section>
+
+    <section class="settings" aria-labelledby="settings-title">
+      <h2 id="settings-title">Settings</h2>
+      <p>Both are read at startup (<code>PHP_INI_SYSTEM</code>), so they belong in <code>php.ini</code>:</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th scope="col">Setting</th><th scope="col">Default</th><th scope="col">Meaning</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row"><code>meminfo.dump_signal</code></th>
+              <td><code>SIGURG</code></td>
+              <td>Signal the process dumps on, by name (with or without <code>SIG</code>) or number. <code>0</code> or empty turns it off.</td>
+            </tr>
+            <tr>
+              <th scope="row"><code>meminfo.dump_dir</code></th>
+              <td>system temp dir</td>
+              <td>
+                Where dumps are written unless the trigger passes <code>--dir</code>. On macOS the temp dir differs per
+                user: set it, or pass <code>--dir</code>.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <pre><code>extension=meminfo.so
+meminfo.dump_signal=SIGURG
+meminfo.dump_dir=/var/tmp/meminfo</code></pre>
+      <p>
+        <code>SIGURG</code> is ignored by default, so signalling a process that is not listening does nothing;
+        <code>SIGUSR1</code>/<code>SIGUSR2</code> would kill an idle php-fpm worker. <code>php -i | grep meminfo</code>
+        shows what a build resolved.
+      </p>
+      <p class="more"><a href="{REPO}#settings" rel="noreferrer">Settings</a></p>
+    </section>
+
+    <section class="dump" aria-labelledby="dump-title">
+      <h2 id="dump-title">Getting a dump</h2>
+      <p>From the application itself:</p>
+      <pre><code>meminfo_dump(fopen('/tmp/dump.json', 'w'));</code></pre>
+      <p>From a running process, without changing it — the command prints the path of the dump:</p>
+      <pre><code>dump-meminfo &lt;pid&gt; --dir=/tmp</code></pre>
+      <p>Or from PHP:</p>
+      <pre><code>$path = meminfo_dump_process($pid, ['dir' =&gt; '/tmp']);</code></pre>
+      <p>
+        To see what grows, take one dump, let the process run, take another, and compare them in the
+        <em>Growth</em> view.
+      </p>
+      <p class="more">
+        <a href="{REPO}#dumping-memory-content" rel="noreferrer">Dumping memory content</a> ·
+        <a href="{REPO}#dumping-a-running-process" rel="noreferrer">Dumping a running process</a>
+      </p>
+    </section>
   </div>
-</section>
+</div>
 
 <style>
+  /* One column, left edges aligned: the drop zone first, the reference below it. */
+  .page {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+    width: min(960px, 100%);
+    margin: 0 auto;
+    padding: 10vh var(--space-4) var(--space-6);
+    box-sizing: border-box;
+  }
+
   .panel {
     display: flex;
     flex-direction: column;
     gap: var(--space-5);
-    width: min(640px, 100% - 2 * var(--space-5));
-    margin: 10vh auto var(--space-6);
+    width: min(640px, 100%);
   }
 
   h1 {
@@ -132,12 +220,99 @@
     margin-top: var(--space-2);
   }
 
-  .howto {
+  /* The reference below the drop zone: one column on phones, two from 900px. */
+  .guide {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-6) var(--space-6);
+    padding-top: var(--space-5);
+    border-top: 1px solid var(--border);
+  }
+
+  @media (min-width: 900px) {
+    .guide {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-areas:
+        'about about'
+        'install settings'
+        'dump settings';
+      align-items: start;
+    }
+
+    .about {
+      grid-area: about;
+      max-width: 72ch;
+    }
+
+    .install {
+      grid-area: install;
+    }
+
+    .settings {
+      grid-area: settings;
+    }
+
+    .dump {
+      grid-area: dump;
+    }
+  }
+
+  .guide section {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+    min-width: 0;
     color: var(--text-muted);
     font-size: var(--text-sm);
+    line-height: 1.55;
+  }
+
+  .about p {
+    font-size: var(--text-md);
+  }
+
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.95em;
+    color: var(--text);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  th,
+  td {
+    padding: var(--space-2) var(--space-2) var(--space-2) 0;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    vertical-align: top;
+  }
+
+  thead th {
+    color: var(--text-faint);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  tbody th {
+    font-weight: 400;
+    white-space: nowrap;
+  }
+
+  .table-wrap {
+    overflow-x: auto;
+  }
+
+  a {
+    color: var(--accent);
+  }
+
+  .more {
+    margin-top: var(--space-1);
   }
 
   h2 {
@@ -153,10 +328,6 @@
     background: var(--surface-sunken);
     color: var(--text);
     overflow-x: auto;
-  }
-
-  .tip {
-    margin-top: var(--space-2);
   }
 
   .notice p {
