@@ -45,10 +45,27 @@ jobs:
           extensions: posix, json, protobuf-${{ steps.protobuf.outputs.version }}
           coverage: none
 
-      # run-tests.php starts PHP with -n, so protobuf has to be loaded by its full path.
+      # run-tests.php of PHP 8 starts PHP with -n, so protobuf has to be loaded by
+      # its full path. That path is taken from the ini setup-php wrote: on macOS
+      # Homebrew keeps it outside php-config's extension dir.
       - name: Locate ext-protobuf
         run: |
-          protobuf="$(php-config --extension-dir)/protobuf.so"
+          protobuf=$(php -r '
+            $files = array_filter(array_map("trim", array_merge([(string) php_ini_loaded_file()], explode(",", (string) php_ini_scanned_files()))));
+            foreach ($files as $file) {
+                foreach (file($file) as $line) {
+                    if (preg_match("/^\\s*extension\\s*=\\s*\"?([^\"\\s;]*protobuf[^\"\\s;]*)/", $line, $m)) {
+                        $path = $m[1];
+                        if ($path[0] !== "/") {
+                            $path = ini_get("extension_dir")."/".(substr($path, -3) === ".so" ? $path : $path.".so");
+                        }
+                        echo $path;
+                        exit(0);
+                    }
+                }
+            }
+            exit(1);
+          ')
           php -n -d extension="$protobuf" -r 'exit(extension_loaded("protobuf") ? 0 : 1);'
           echo "PROTOBUF_SO=$protobuf" >> "$GITHUB_ENV"
 
@@ -69,18 +86,23 @@ jobs:
           ! grep -q '^#define HAVE_SIGQUEUE' extension/config.h
 
       # run-tests.php from PHP 7 does not pick up the freshly built module on its
-      # own, so the extension is passed explicitly. make test works on PHP 8.
+      # own, so the extension is passed explicitly; it does read php.ini, which
+      # already loads protobuf. make test works on PHP 8.
       - name: Test the extension (PHP 7)
         if: startsWith(matrix.php-versions, '7.')
         run: |
           cd extension/
-          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 TEST_PHP_EXECUTABLE=$(which php) $(which php) run-tests.php -d extension=$PWD/modules/meminfo.so -d extension="$PROTOBUF_SO"
+          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 TEST_PHP_EXECUTABLE=$(which php) $(which php) run-tests.php -d extension=$PWD/modules/meminfo.so | tee run-tests.log
 
       - name: Test the extension (PHP 8)
         if: startsWith(matrix.php-versions, '8.')
         run: |
           cd extension/
-          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test TESTS="-d extension=$PROTOBUF_SO tests/"
+          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test TESTS="-d extension=$PROTOBUF_SO tests/" | tee run-tests.log
+
+      - name: Check that the protobuf test ran
+        run: |
+          grep -E '(PASS|FAIL).*bug-protobuf_null_properties' extension/run-tests.log
 
       - name: Show failed extension tests
         if: failure()
