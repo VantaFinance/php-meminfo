@@ -17,6 +17,6 @@
         "psr-4": { "spec\\": "spec/" }
     },
     "require-dev": {
-        "phpspec/phpspec": "^4.3 || ^5.1 || ^6.3 || ^7.0"
+        "phpspec/phpspec": "^4.3 || ^5.1 || ^6.3 || ^7.0 || ^8.0"
     }
 }

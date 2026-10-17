@@ -85,7 +85,9 @@ Check that variables are labelled with the user function they belong to
         $fiberDump = fopen('php://memory', 'rw');
         meminfo_dump($fiberDump);
 
-        echo "frame of a local inside a suspended fiber: ", frame_of($fiberDump, 'insideFiber'), "\n";
+        // PHP 8.4 names closures after where they are declared, {closure:<file>:<line>}.
+        $fiberFrame = preg_replace('/^\{closure:.+\}\(\)$/', '{closure}()', frame_of($fiberDump, 'insideFiber'));
+        echo "frame of a local inside a suspended fiber: ", $fiberFrame, "\n";
         fclose($fiberDump);
 
         // Resuming afterwards proves the fiber was left usable.

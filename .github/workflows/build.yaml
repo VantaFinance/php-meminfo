@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-versions: ['7.0', '7.1', '7.2', '7.3', '7.4', '8.0', '8.1']
+        php-versions: ['7.0', '7.1', '7.2', '7.3', '7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
         sigqueue: ['yes']
         os: ['ubuntu-22.04']
         include:
@@ -51,13 +51,13 @@ jobs:
       # run-tests.php from PHP 7 does not pick up the freshly built module on its
       # own, so the extension is passed explicitly. make test works on PHP 8.
       - name: Test the extension (PHP 7)
-        if: matrix.php-versions != '8.0' && matrix.php-versions != '8.1'
+        if: startsWith(matrix.php-versions, '7.')
         run: |
           cd extension/
           REPORT_EXIT_STATUS=1 NO_INTERACTION=1 TEST_PHP_EXECUTABLE=$(which php) $(which php) run-tests.php -d extension=$PWD/modules/meminfo.so
 
       - name: Test the extension (PHP 8)
-        if: matrix.php-versions == '8.0' || matrix.php-versions == '8.1'
+        if: startsWith(matrix.php-versions, '8.')
         run: |
           cd extension/
           REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test

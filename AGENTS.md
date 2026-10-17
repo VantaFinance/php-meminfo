@@ -21,7 +21,7 @@ the same dumps entirely client-side.
   build (`Dockerfile`, `php:<version>-cli-alpine`) selected by `PHP_VERSION`; `CMakeLists.txt` is
   IDE-only (CLion code insight), never used to build the extension
 - **Testing:** `.phpt` (extension), phpspec (analyzer), Vitest + Playwright (UI)
-- **Supported PHP:** 7.0 – 8.1 (CI matrix)
+- **Supported PHP:** 7.0 – 8.5 (CI matrix)
 
 ## Project Structure
 
@@ -51,13 +51,13 @@ ui/                           browser UI (TypeScript + Svelte 5 + Vite); dumps a
   tests/fixtures/             real dumps (parity/ and ui-only/), make-fixtures.php, analyzer-baseline.php
   tests-e2e/                  Playwright: app flow, privacy, memory budget, crash recovery
 doc/                          usage guides and example scripts
-.github/workflows/            CI: build extension + run both test suites on PHP 7.0–8.1 (Linux), plus PHP 8.1 on macOS and on Linux without sigqueue(); ui.yaml tests the UI and deploys it to GitHub Pages from master
+.github/workflows/            CI: build extension + run both test suites on PHP 7.0–8.5 (Linux), plus PHP 8.1 on macOS and on Linux without sigqueue(); ui.yaml tests the UI and deploys it to GitHub Pages from master
 Dockerfile                    builds + enables the extension for a given PHP_VERSION (image meminfo:php-X.Y)
 .dockerignore                 keeps host build artifacts, vendor/ and ui/ out of the Docker build context
 tools/repro/protobuf/         repro image (meminfo + ext-protobuf, optional ext-grpc) and repro.php dump check
 tools/repro/memory/           probes for what a dump costs the dumped process: memory, speed, deep structures, signal path, target-side file hardening
 CMakeLists.txt                IDE-only CLion project model over extension/ (Zend headers from .ide/)
-CMakePresets.json             one CMake profile per PHP version (php-7.0 … php-8.1)
+CMakePresets.json             one CMake profile per PHP version (php-7.0 … php-8.5)
 .ide/                         PHP headers extracted by `make ide` (git-ignored)
 .ai-factory/                  AI Factory configuration and generated context
 .claude/skills/               project-specific agent skills
@@ -103,7 +103,7 @@ make ci             # what CI runs: build + both test suites
 make clean          # remove build artifacts and dependencies
 make docker-build PHP_VERSION=7.4   # build image meminfo:php-7.4 with the extension enabled
 make docker-test  PHP_VERSION=7.4   # both test suites inside that image
-make docker-matrix  # docker-test for every version in PHP_VERSIONS (7.0 – 8.1)
+make docker-matrix  # docker-test for every version in PHP_VERSIONS (7.0 – 8.5)
 make docker-shell PHP_VERSION=7.4   # bash shell in the image
 make docker-clean   # remove all meminfo:php-* images
 make repro          # dump ext-protobuf objects (WITH_GRPC=1 adds ext-grpc) and check the JSON
@@ -167,5 +167,5 @@ cd analyzer && composer install && vendor/bin/phpspec run
   side requires the matching change, tests and specs on the others in the same commit.
 - The UI must never hold a dump on the main thread, read it whole (`Blob.text()`, `JSON.parse`) or
   send anything off the page; `ui-e2e` enforces the memory budget and the no-network rule.
-- All changes must keep the PHP 7.0 – 8.1 CI matrix green. Engine API differences are handled with
+- All changes must keep the PHP 7.0 – 8.5 CI matrix green. Engine API differences are handled with
   `PHP_VERSION_ID` preprocessor guards, not runtime checks.

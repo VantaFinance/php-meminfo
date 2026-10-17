@@ -157,7 +157,7 @@ ci: build test ## Run the full pipeline as CI does (build extension, both test s
 # host toolchain. The extension lives only in the image $(DOCKER_TAG).
 # Keep PHP_VERSIONS in sync with the matrix in .github/workflows/build.yaml.
 PHP_VERSION     ?= 8.1
-PHP_VERSIONS    ?= 7.0 7.1 7.2 7.3 7.4 8.0 8.1
+PHP_VERSIONS    ?= 7.0 7.1 7.2 7.3 7.4 8.0 8.1 8.2 8.3 8.4 8.5
 DOCKER          ?= docker
 DOCKER_IMAGE    ?= meminfo
 DOCKER_TAG      := $(DOCKER_IMAGE):php-$(PHP_VERSION)
