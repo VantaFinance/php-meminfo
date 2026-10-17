@@ -51,7 +51,7 @@ test('finds the planted leak, its growth and its reference path, without leaving
   expect(await cspViolations()).toEqual([])
 })
 
-test('opens a dump the PHP analyzer rejects (invalid UTF-8 in keys)', async ({ page }) => {
+test('opens a dump json_decode rejects (invalid UTF-8 in keys)', async ({ page }) => {
   await page.goto('/')
   await page.locator('input[type=file]').first().setInputFiles(fixture('ui-only/invalid-utf8'))
   await expect(page.getByRole('heading', { name: 'Leak suspects' })).toBeVisible()

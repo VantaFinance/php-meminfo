@@ -4,6 +4,7 @@
  *
  *   php ui/tests/fixtures/make-fixtures.php
  *   MEMINFO_EXT=/path/to/meminfo.so php -n ui/tests/fixtures/make-fixtures.php
+ *   php ui/tests/fixtures/make-fixtures.php --parity   # see below
  *
  * Needs PHP 8.1+ with the meminfo extension (enums, Fibers). Each scenario runs
  * in its own process so that statics and classes of one never show up in the
@@ -11,10 +12,14 @@
  * them.
  *
  * Two groups:
- *  - parity/  valid UTF-8 only, so the PHP analyzer's Loader can read them and
- *             analyzer-baseline.php can record what it computes;
- *  - ui-only/ quirks the PHP analyzer cannot open or that json_decode loses
- *             (invalid UTF-8, NUL-truncated keys, duplicate keys, lost roots).
+ *  - parity/  frozen. Their *.expected.json baselines were recorded by the PHP
+ *             CLI analyzer, which has since been removed, and they hold the
+ *             addresses of these exact dumps. Regenerating a parity dump would
+ *             leave its baseline unmatched with nothing left to rebuild it, so
+ *             they are skipped unless --parity is passed, and even then only
+ *             once the stale baselines have been deleted by hand;
+ *  - ui-only/ quirks that json_decode loses or rejects (invalid UTF-8,
+ *             NUL-truncated keys, duplicate keys, lost roots).
  */
 
 $scenarios = array(
@@ -28,6 +33,20 @@ $scenarios = array(
 );
 
 if ($argc < 3) {
+    $withParity = in_array('--parity', $argv, true);
+
+    if ($withParity) {
+        $baselines = glob(__DIR__ . '/parity/*.expected.json');
+        if ($baselines) {
+            fwrite(STDERR, "refusing --parity: these baselines would no longer match and cannot be rebuilt:\n");
+            foreach ($baselines as $baseline) {
+                fwrite(STDERR, '  ' . $baseline . "\n");
+            }
+            fwrite(STDERR, "delete them (and replace the parity tests in basic.test.ts) first\n");
+            exit(1);
+        }
+    }
+
     if (!function_exists('meminfo_dump')) {
         fwrite(STDERR, "meminfo is not loaded; set MEMINFO_EXT or enable it in php.ini\n");
         exit(1);
@@ -41,6 +60,11 @@ if ($argc < 3) {
     $command .= ' -d memory_limit=-1 ' . escapeshellarg(__FILE__);
 
     foreach ($scenarios as $name => $function) {
+        if (strpos($name, 'parity/') === 0 && !$withParity) {
+            printf("%-26s skipped (frozen, see --parity)\n", $name);
+            continue;
+        }
+
         $out = __DIR__ . '/' . $name . '.json';
         if (!is_dir(dirname($out))) {
             mkdir(dirname($out), 0777, true);

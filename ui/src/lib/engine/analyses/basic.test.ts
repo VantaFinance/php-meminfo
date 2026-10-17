@@ -33,7 +33,7 @@ function parseText(text: string): DumpStore {
   return parser.finish()
 }
 
-describe.each(FIXTURES)('parity with the PHP analyzer on %s', (name) => {
+describe.each(FIXTURES)('matches the frozen baselines of the former PHP analyzer on %s', (name) => {
   const { store, expected } = load(name)
 
   it('has the same items', () => {

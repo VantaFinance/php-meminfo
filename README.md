@@ -1,31 +1,37 @@
 MEMINFO
 =======
-PHP Meminfo is a PHP extension that gives you insights on the PHP memory content.
 
-Its main goal is to help you understand memory leaks: by looking at data present in memory, you can better understand your application behaviour.
+![Build](https://github.com/VantaFinance/php-meminfo/workflows/Build%20and%20test%20the%20extension/badge.svg)
 
-One of the main sources of inspiration for this tool is the Java jmap tool with the -histo option (see `man jmap`).
+PHP Meminfo is a PHP extension that writes the content of PHP memory to a JSON file: every array,
+object and value still reachable, the variable or static it hangs from, and what refers to what. Its
+main goal is to help you find memory leaks in long-running PHP processes. The dump is analyzed in a
+[browser UI](https://vantafinance.github.io/php-meminfo/) that runs entirely in your browser and
+points at what keeps memory alive and what grows. A process can be dumped from its own code with
+`meminfo_dump()`, or from outside, while it runs, with `dump-meminfo <pid>`.
 
-![Build](https://github.com/BitOne/php-meminfo/workflows/Build%20the%20extension%20and%20test%20the%20analyzers/badge.svg)
+One of the main sources of inspiration for this tool is the Java jmap tool with the `-histo` option.
 
 Compatibility
 -------------
-PHP 7.0 – 8.5 (tested in CI on every version).
 
-For older versions of PHP, you can use the following releases:
- - 5.6: PHP Meminfo v1.1
- - 5.5: PHP Meminfo v1.0.5 (may work with PHP 5.3 and PHP 5.4 but not tested)
+PHP 7.0 – 8.5 (tested in CI on every version). Dumping another, running process needs the target to
+be PHP 7.1 or later, non-ZTS, on POSIX.
 
-Quick start with Make
----------------------
-A `Makefile` in the repository root wraps the commands below. Run `make help` to list every target.
+For older versions of PHP, use an older release: PHP Meminfo v1.1 for PHP 5.6, v1.0.5 for PHP 5.5.
+
+Installation
+------------
+
+### Quick start with Make
+
+A `Makefile` in the repository root wraps the build. Run `make help` to list every target.
 
 ```bash
 $ make build          # build the extension (phpize + configure + make, as needed)
-$ make install        # install the analyzer dependencies via Composer
-$ make test           # run both test suites (.phpt for the extension, phpspec for the analyzer)
-$ make check          # lint + both test suites
-$ make clean          # remove build artifacts and dependencies
+$ make install-ext    # install it into the PHP extension directory (may need sudo)
+$ make install-cli    # install the dump-meminfo command into $(PREFIX)/bin, default /usr/local
+$ make test           # run the extension's .phpt suite
 ```
 
 To build against a specific PHP installation, override the toolchain variables:
@@ -34,12 +40,9 @@ To build against a specific PHP installation, override the toolchain variables:
 $ make build PHPIZE=/usr/local/php-7.4/bin/phpize PHP_CONFIG=/usr/local/php-7.4/bin/php-config
 ```
 
-The manual steps remain fully supported and are documented below.
+### Compilation
 
-Compilation instructions
-------------------------
-## Compilation
-From the root of the `extension` directory:
+From the `extension` directory:
 
 ```bash
 $ phpize
@@ -48,605 +51,124 @@ $ make
 $ make install
 ```
 
+### Docker
 
-## Docker Build
-
+In your own image:
 
 ```dockerfile
 RUN git clone https://github.com/VantaFinance/php-meminfo && cd php-meminfo/extension && phpize && ./configure --enable-meminfo && make && make install && echo 'extension=meminfo.so' >> /usr/local/etc/php/conf.d/docker-php-ext-meminfo.ini
 ```
 
-## Build and test in Docker
+`make docker-build PHP_VERSION=8.1` builds a ready image (`meminfo:php-8.1`) from the repository
+`Dockerfile`; see [Development](doc/development.md) for the Docker test matrix and the IDE setup.
 
-To work on the extension without a local PHP toolchain, the repository `Dockerfile` builds it on top of
-`php:<version>-cli-alpine`. The PHP version is selected with `PHP_VERSION` (`7.0`, `7.1`, `7.2`, `7.3`,
-`7.4`, `8.0`, `8.1`; default `8.1`):
+### Enabling the extension
 
-```bash
-$ make docker-build PHP_VERSION=7.4   # build the image meminfo:php-7.4 with the extension enabled
-$ make docker-test  PHP_VERSION=7.4   # run the .phpt and phpspec suites inside that image
-$ make docker-matrix                  # docker-test for every supported PHP version
-$ make docker-shell PHP_VERSION=7.4   # open a bash shell in the image
-$ make docker-clean                   # remove all meminfo:php-* images
-```
-
-The extension only lives inside the image, nothing is written to the host. Use the image to take a dump of
-your own script:
-
-```bash
-$ docker run --rm -v "$PWD":/app meminfo:php-8.1 php /app/script.php
-```
-
-Set `DOCKER_PLATFORM` to build for another architecture, e.g. `DOCKER_PLATFORM=linux/amd64` on Apple Silicon.
-
-The first build of each version is slow, especially for PHP 7.0 whose Alpine mirror can take several
-minutes to install the compiler toolchain; later builds reuse the cached layer.
-
-## IDE setup (CLion)
-
-`CMakeLists.txt` exists only to give CLion code insight into the Zend API; the extension is still built
-with phpize. The PHP headers come from the Docker image of the version you want to work against:
-
-```bash
-$ make ide PHP_VERSION=8.1   # copy the PHP 8.1 headers into .ide/php-8.1/
-$ make ide-clean             # remove all extracted headers
-```
-
-Then in CLion:
-
-1. Right-click `CMakeLists.txt` → **Load CMake Project**.
-2. In Settings → Build, Execution, Deployment → CMake, disable the auto-created `Debug` profile and
-   enable the `php-X.Y` profile(s) from `CMakePresets.json`.
-3. Select the profile matching the extracted headers. `#if PHP_VERSION_ID` branches follow that version.
-
-When switching to a version whose headers are missing, run `make ide PHP_VERSION=X.Y` first — CMake
-stops with that hint otherwise.
-
-
-## Enabling the extension
 Add the following line to your `php.ini`:
 
 ```ini
 extension=meminfo.so
 ```
 
-Installing analyzers
---------------------
-Analyzers allow to analyze a memory dump (see below).
-
-```bash
-$ cd analyzer
-$ composer install
-```
-
-Usage
------
-## Dumping memory content
-
-```php
-meminfo_dump(fopen('/tmp/my_dump_file.json', 'w'));
-
-```
-
-This function generates a dump of the PHP memory in a JSON format. This dump can be later analyzed by the provided analyzers.
-
-This function takes a stream handle as a parameter. It allows you to specify a file (ex `fopen('/tmp/file.txt', 'w')`, as well as to use standard output with the `php://stdout` stream.
-
-## Dumping a running process
-
-Calling `meminfo_dump()` requires changing the application. When a worker is
-already running and leaking, a dump can instead be requested from outside:
-
-```bash
-$ dump-meminfo 12345
-/tmp/meminfo-1834201933.json
-```
-
-On systems without `sigqueue()`, such as macOS, the request cannot carry an id,
-so the target names the file after its pid and the time the dump started
-(`meminfo-12345-1792181893-19785.json`) and the trigger looks for a file of that
-shape written after it asked.
-
-The only requirement on the target is that the extension is loaded. On
-receiving the signal it records the request and raises the engine's interrupt
-flag; the dump itself is written at the next safe point between two opcodes, so
-the application is never interrupted mid-operation.
-
-```bash
-$ dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force]
-```
-
-Without `--dir` the target writes to its own `meminfo.dump_dir`. With it, the
-dump is written to `DIR` (relative paths are resolved by the caller): the
-trigger leaves the directory in a request file, `/tmp/meminfo-request-<pid>…`,
-which the target reads when it serves the signal and the trigger removes
-afterwards. If the target cannot write there, the trigger fails at once with the
-target's reason instead of waiting out `--timeout`. A target running a meminfo
-that predates this cannot be told where to write; look in its `meminfo.dump_dir`.
-
-It prints the path of the finished dump on stdout and nothing else, so it
-composes directly with the analyzer:
-
-```bash
-$ bin/analyzer summary "$(dump-meminfo 12345)"
-```
-
-The same thing is available from PHP:
-
-```php
-$path = meminfo_dump_process(12345, ['dir' => '/var/tmp', 'timeout' => 60]);
-```
-
-It returns the path of the finished dump. Install the command with
-`make install-cli` (honours `PREFIX`).
-
-### Errors
-
-Nothing is reported by a return value — every failure throws, so a dump cannot
-be mistaken for a success that happens to have produced no file:
-
-```php
-try {
-    $path = meminfo_dump_process($pid);
-} catch (InvalidArgumentException $e) {
-    // The call itself was wrong: a pid that cannot be signalled, an unknown
-    // signal name, no signal configured.
-} catch (RuntimeException $e) {
-    // The target or the environment: not handling the signal, no longer
-    // running, timed out, a result that is not the file it should be.
-}
-```
-
-`meminfo_dump()` throws `RuntimeException` as well, when the dump cannot be
-written to the stream it was given. Note that the stream then holds a partial
-dump: the bytes written before the failure are not rolled back, unlike the
-signal path, which writes to a temporary file and removes it.
-
-`dump-meminfo` maps the same distinction onto its exit code:
-
-| Exit | Meaning |
-|---|---|
-| 0 | The dump was written. Its path is on stdout, and nothing else is. |
-| 1 | A runtime failure — the target or the environment. |
-| 2 | Bad usage, from either the command's own argument parsing or the call. |
-
-The message always goes to stderr, so `$(dump-meminfo PID)` stays usable.
-
 ### Settings
+
+Both settings are `PHP_INI_SYSTEM` and only matter for [dumping a running process](#dumping-a-running-process):
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `meminfo.dump_signal` | `SIGURG` | Signal the process dumps on, by name (with or without the `SIG` prefix) or number. `0` or empty disables it. |
-| `meminfo.dump_dir` | system temp dir | Where dump files are written unless the trigger passes `--dir` / `'dir'`. Without it, the trigger looks in its own `meminfo.dump_dir`, so both sides must agree. On macOS the system temp dir (`$TMPDIR`) differs per user — set this explicitly there, or pass `--dir`. |
+| `meminfo.dump_signal` | `SIGURG` | Signal the process dumps on, by name or number. `0` or empty disables it. |
+| `meminfo.dump_dir` | system temp dir | Where dumps are written unless the trigger passes `--dir`. |
 
-Both are `PHP_INI_SYSTEM`, so they belong in `php.ini`:
+`php -i | grep meminfo` shows what a build resolved. Details, and why `SIGURG`, are in
+[Dumping a running process](doc/process_dump.md#settings).
 
-```ini
-extension=meminfo.so
-meminfo.dump_signal=SIGURG
-meminfo.dump_dir=/var/tmp/meminfo
+Usage
+-----
+
+### Dumping memory content
+
+```php
+meminfo_dump(fopen('/tmp/my_dump_file.json', 'w'));
 ```
 
-`php -i | grep meminfo` reports the resolved signal, the directory, and whether
-this build can dump on a signal at all.
+This writes a dump of the PHP memory, as JSON, to the given stream: a file, or `php://stdout`. It
+throws `RuntimeException` when the stream cannot be written to. [`doc/example.php`](doc/example.php)
+is a minimal script (`make dump-example` runs it).
 
-#### Why `SIGURG` is the default
+### Dumping a running process
 
-It is the only common signal whose default action is to *ignore* it, so sending
-it to a process that happens not to be listening does nothing. `SIGUSR1` and
-`SIGUSR2` look like the natural choice but are a poor one: php-fpm resets them
-to `SIG_DFL` in every worker, where their default action is to **terminate**, so
-a mistargeted signal would kill an idle worker. They remain available through
-`meminfo.dump_signal` for anyone who needs them.
-
-### Finding an FPM worker
-
-Enable the status page in the pool configuration:
-
-```ini
-pm.status_path = /status
-```
-
-Then pick the worker that is actually serving the request you care about —
-`?full&json` lists one entry per worker with its `pid`, `state` and
-`request uri`:
+When a worker is already running and leaking, ask it for a dump from outside, without changing or
+restarting it. The target only needs the extension loaded; it writes the dump at the next safe point
+between two opcodes, and the command prints its path:
 
 ```bash
-$ curl -s 'http://127.0.0.1/status?full&json' | jq -r \
-    '.processes[] | select(.state == "Running") | "\(.pid) \(."request uri")"'
+$ dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force]
+$ dump-meminfo 12345 --dir=/tmp
+/tmp/meminfo-1834201933.json
 ```
 
-**Aim at a worker, never at the FPM master.** The master interprets `SIGUSR1` as
-"reopen logs" and `SIGUSR2` as "reload", and it reports both as handled, so the
-safety check below cannot refuse them — sending `SIGUSR2` to the master
-restarts the whole pool. Note that `pgrep -f 'php-fpm: pool www'` matches the
-master as well; take the pid from the status page.
+The same from PHP: `$path = meminfo_dump_process(12345, ['dir' => '/tmp']);`. Every failure throws;
+the command exits with 1 on a runtime failure and 2 on bad usage. Under php-fpm, only a worker that is
+serving a request can be dumped — take its pid from the status page, never the master's.
 
-### When it refuses
+Errors, settings, FPM, containers, security and limitations are covered in
+[Dumping a running process](doc/process_dump.md).
 
-Before signalling anything, the trigger checks `/proc/<pid>/status` (on macOS,
-the kernel's process record) to see whether the target actually handles the
-signal. The handler exists only for the
-duration of a request, so this single check catches all of: the extension is
-not loaded, the target is a build that cannot serve a dump, or the worker is
-idle.
+### Analyzing a dump in the browser
 
-```
-$ dump-meminfo 12345
-meminfo_dump_process(): process 12345 does not handle signal 23: ...
-$ echo $?
-1
-```
-
-`--force` skips the check. On a system where the check is impossible (no
-`/proc`, and not macOS), only the default `SIGURG` is sent without it.
-
-`--force` does not, however, make the trigger send a signal whose default
-action would terminate or stop a target that is known not to handle it — there
-is no dump to be had that way, only a dead process.
-
-### Limitations
-
-- **The target must be PHP 7.1 or later, non-ZTS, on POSIX.** The interrupt hook
-  the dump relies on does not exist before 7.1, and under ZTS a signal arrives
-  on an arbitrary thread. `dump-meminfo` and `meminfo_dump_process()` themselves
-  work from any build, including PHP 7.0 — a process that cannot serve a dump
-  can still ask another one for its.
-- **Under FPM, only a worker that is handling a request can be dumped.** Between
-  requests there is no PHP memory worth dumping and no handler installed.
-- **The dump happens at the next opcode.** A target blocked in a long internal
-  call or in I/O only reaches that point when the call returns. Asking for a
-  dump interrupts the wait, which is visible to the application: `sleep()`
-  returns early, `stream_select()` reports an interrupted system call, and
-  `pcntl` dispatches any signals it had pending.
-- **`max_execution_time` is paused for the duration of the dump**, so dumping a
-  large heap cannot time out the request it interrupts. FPM's
-  `request_terminate_timeout` and the web server's `fastcgi_read_timeout` keep
-  running, though — a dump big enough to outlast them will lose the worker.
-- **FPM's slowlog can swallow the signal.** It uses `ptrace` on the worker to
-  collect a backtrace; a signal arriving in that window may be lost. Retry.
-- **Without `sigqueue()` (macOS), concurrent requests are not told apart.** Two
-  triggers asking the same process at the same moment may be handed the same
-  file, and a second one passing `--dir` while the first is still waiting is
-  refused ("another dump request is pending"). Requests made one after the other
-  always get separate dumps. The signal is resent at most three times, so a
-  target writing somewhere the trigger cannot see produces a bounded number of
-  dumps rather than one per second.
-- **The analyzer needs memory for large dumps**, roughly a kilobyte per item:
-  ```bash
-  $ php -d memory_limit=-1 analyzer/bin/analyzer summary /tmp/meminfo-....json
-  ```
-
-### Security
-
-A dump contains array keys, class and property names, string contents and heap
-addresses — everything the request had in memory. Treat it as sensitive:
-
-- Dump files are created with mode `0600`, owned by the user the target runs as.
-- The temporary file is opened with `O_EXCL | O_NOFOLLOW`, so a symlink or a
-  leftover file at that path is never written through or into; the attempt is
-  recorded in the target's error log.
-- The returned path is verified to be a regular file with a single link, owned
-  by the user the target runs as, before it is handed back. The owner comes from
-  `/proc` or, on macOS, from the kernel's process record; where it cannot be
-  determined only files of the calling user are accepted, and none when the
-  caller is root. Without `sigqueue()`, files of the expected shape that fail
-  this check, or are timestamped before the request or in the future, are
-  skipped rather than returned.
-- Requesting a dump needs permission to signal the target: the same user, or
-  root. Reading the result across mount namespaces additionally needs
-  `CAP_SYS_PTRACE`.
-- A signal whose default action would terminate or stop the target is never
-  sent to a process that is known not to handle it, not even with `--force`.
-  `--force` only covers the case where that cannot be determined.
-- A request file from `--dir` is honoured only if it is a regular file with a
-  single link, not a symlink, and owned by the target's own user or by root —
-  the users that may signal it anyway — and names an absolute directory.
-  Anything else at that name is ignored. Whoever may ask for a dump can thus
-  choose where it goes; nobody else can.
-- **`meminfo.dump_dir` must not be writable by anyone you do not trust.** The
-  returned path is verified before it is handed back, but anything that can
-  write to that directory can replace the file afterwards. The default system
-  temporary directory is shared; prefer a dedicated directory owned by the user
-  the target runs as.
-- Nothing from the dump path ever reaches the target's own output. Failures go
-  to its error log, so a dump cannot corrupt a response or trigger a user error
-  handler.
-
-### Containers
-
-Signals do not cross PID namespaces, so the trigger has to run in the target's:
+Open <https://vantafinance.github.io/php-meminfo/> and drop the dump on the page. The page is static:
+the dump is read and analyzed in your browser and never leaves it. To run it locally (Node 24+):
 
 ```bash
-$ docker exec <container> dump-meminfo <pid>
-$ kubectl exec <pod> -c <container> -- dump-meminfo <pid>
+$ make ui-install
+$ make ui-dev         # then open the printed URL
 ```
 
-An ephemeral debug container shares the PID namespace but not the filesystem,
-so it will not see the dump; run inside the target container instead. With
-`readOnlyRootFilesystem`, point `meminfo.dump_dir` at a writable volume (an
-`emptyDir` is enough) and make sure it is large enough — a dump is roughly
-800 bytes per item.
+It shows the leak suspects (what retains the most memory), growth against an earlier dump of the same
+process, a summary by type and class, the largest collections, a search, and for any item every
+reference path from a root and a graph of what keeps it reachable. See `ui/README.md` for building
+and testing it.
 
-### Cleaning up
-
-A dump is written to `<name>.json.tmp` and renamed into place only once it is
-complete, so a `.json` file is always whole. A target killed mid-dump leaves its
-`.tmp` behind; those are safe to delete:
-
-```bash
-$ find /tmp -maxdepth 1 -name 'meminfo-*.json.tmp' -mtime +1 -delete
-```
-
-## Analyzing a dump in the browser
-
-`ui/` is a browser app that opens a dump and points at the likely leak, with no backend: the file is
-read and analyzed in the browser and nothing is sent anywhere.
-
-```bash
-$ make ui-install   # once (Node 24+)
-$ make ui-dev       # then open the printed URL and drop a dump on the page
-```
-
-A build of `master` is published on GitHub Pages at <https://vantafinance.github.io/php-meminfo/> —
-the page is static and works the same way: the dump you open stays in your browser. Its start page
-also sums up installation, the settings below and how to take a dump, linking back here for details.
-
-Or build it once and serve `ui/dist` from any static host (`make ui-build`, then for example
-`python3 -m http.server -d ui/dist`). It must be served: opened from `file://`, Chromium and Safari
-refuse to run its module scripts.
-
-What it shows:
-
-- **Leak suspects** — what keeps the most memory alive: a dominator tree over everything reachable
-  from the roots, with the retained size of each item and of each class (counting only top-most
-  instances), and data shared by several roots flagged as such.
-- **Growth** — load an earlier dump of the same process as a baseline to see which types and classes
-  keep growing. Only the baseline's totals are kept, not a second dump.
-- **Summary**, **Top children** and **Search** — the same analyses as the CLI analyzer below
-  (checked against it in the tests).
-- An **inspector** for any item: what dominates it, every reference path from a root, its children
-  and what refers to it.
-- A **graph** of what keeps an item reachable: the shortest paths from every root that reaches it,
-  merged into one picture with the roots on the left and the item on the right, and the items every
-  path goes through highlighted — free one of those and the item goes. A neighbourhood mode draws
-  the items around one (its holders and what it holds, up to three hops); double-click any node to
-  bring in its neighbours, click it to inspect it. Every address in Search, Top children and the
-  inspector opens it, as does "Show graph" in the inspector. A graph is capped at 600 items, the
-  nearest roots first, so it stays readable; the app says when it cut one short.
-
-Large dumps are read as a stream in a Web Worker into compact typed arrays; the page itself holds
-only what is on screen. A 300 MB dump (2M items) opens in about 1.3 s with about 2 MB of JavaScript
-heap on the page. Chrome should hold dumps of about 15M items (~2.5 GB); larger ones, and the limits
-of other browsers, have not been measured — if a tab runs out of memory, the app says so after the
-reload. It also opens dumps that the PHP analyzer rejects because a key holds invalid UTF-8.
-
-Retained sizes are relative: item sizes are the extension's estimates, and an object that a
-function's local reached first appears without its later holders (a global or a static also
-holding it emits no item of its own).
-
-## Displaying a summary of items in memory
-```bash
-$ bin/analyzer summary <dump-file>
-
-Arguments:
-  dump-file             PHP Meminfo Dump File in JSON format
-```
-
-### Example
-```bash
-$ bin/analyzer summary /tmp/my_dump_file.json
-+----------+-----------------+-----------------------------+
-| Type     | Instances Count | Cumulated Self Size (bytes) |
-+----------+-----------------+-----------------------------+
-| string   | 132             | 7079                        |
-| MyClassA | 100             | 7200                        |
-| array    | 10              | 720                         |
-| integer  | 5               | 80                          |
-| float    | 2               | 32                          |
-| null     | 1               | 16                          |
-+----------+-----------------+-----------------------------+
-```
-
-## Displaying a list of objects with the largest number of children
-```bash
-$ bin/analyzer top-children [options] [--] <dump-file>
-
-Arguments:
-  dump-file             PHP Meminfo Dump File in JSON format
-
-Options:
-  -l, --limit[=LIMIT]   limit [default: 5]
-```
-
-### Example
-```bash
-$ bin/analyzer top-children /tmp/my_dump_file.json
-+-----+----------------+----------+
-| Num | Item ids       | Children |
-+-----+----------------+----------+
-| 1   | 0x7ffff4e22fe0 | 1000000  |
-| 2   | 0x7fffe780e5c8 | 11606    |
-| 3   | 0x7fffe9714ef0 | 11602    |
-| 4   | 0x7fffeab63ca0 | 3605     |
-| 5   | 0x7fffd3161400 | 2400     |
-+-----+----------------+----------+
-
-```
-
-## Querying the memory dump to find specific objects
-```bash
-$ bin/analyzer query [options] [--] <dump-file>
-
-Arguments:
-  dump-file              PHP Meminfo Dump File in JSON format
-
-Options:
-  -f, --filters=FILTERS  Filter on an attribute. Operators: =, ~. Example: class~User (multiple values allowed)
-  -l, --limit=LIMIT      Number of results limit (default 10).
-  -v                     Increase the verbosity
-```
-
-### Example
-
-```bash
-$ bin/analyzer query -v -f "class=MyClassA" -f "is_root=0" /tmp/php_mem_dump.json
-+----------------+-------------------+------------------------------+
-| Item ids       | Item data         | Children                     |
-+----------------+-------------------+------------------------------+
-| 0x7f94a1877008 | Type: object      | myObjectName: 0x7f94a185cca0 |
-|                | Class: MyClassA   |                              |
-|                | Object Handle: 1  |                              |
-|                | Size: 72 B        |                              |
-|                | Is root: No       |                              |
-+----------------+-------------------+------------------------------+
-| 0x7f94a1877028 | Type: object      | myObjectName: 0x7f94a185cde0 |
-|                | Class: MyClassA   |                              |
-|                | Object Handle: 2  |                              |
-|                | Size: 72 B        |                              |
-|                | Is root: No       |                              |
-+----------------+-------------------+------------------------------+
-| 0x7f94a1877048 | Type: object      | myObjectName: 0x7f94a185cf20 |
-|                | Class: MyClassA   |                              |
-...
-
-```
-
-## Displaying the reference path
-The reference path is the path between a specific item in memory (identified by its
-pointer address) and all the intermediary items up to the one item that is attached
-to a variable still alive in the program.
-
-This path shows which items are responsible for the memory leak of the specific item
-provided.
-
-```bash
-$ bin/analyzer ref-path <item-id> <dump-file>
-
-Arguments:
-  item-id               Item Id in 0xaaaaaaaa format
-  dump-file             PHP Meminfo Dump File in JSON format
-
-Options:
-  -v                     Increase the verbosity
-```
-
-### Example
-
-```bash
-$ bin/analyzer ref-path -v 0x7f94a1877068 /tmp/php_mem_dump.json
-Found 1 paths
-Path from 0x7f94a1856260
-+--------------------+
-| Id: 0x7f94a1877068 |
-| Type: object       |
-| Class: MyClassA    |
-| Object Handle: 4   |
-| Size: 72 B         |
-| Is root: No        |
-| Children count: 1  |
-+--------------------+
-         ^
-         |
-         3
-         |
-         |
-+---------------------+
-| Id: 0x7f94a185cb60  |
-| Type: array         |
-| Size: 72 B          |
-| Is root: No         |
-| Children count: 100 |
-+---------------------+
-         ^
-         |
-    second level
-         |
-         |
-+--------------------+
-| Id: 0x7f94a185ca20 |
-| Type: array        |
-| Size: 72 B         |
-| Is root: No        |
-| Children count: 1  |
-+--------------------+
-         ^
-         |
-    first level
-         |
-         |
-+---------------------------+
-| Id: 0x7f94a1856260        |
-| Type: array               |
-| Size: 72 B                |
-| Is root: Yes              |
-| Execution Frame: <GLOBAL> |
-| Symbol Name: myRootArray  |
-| Children count: 1         |
-+---------------------------+
-```
-
-A workflow to find and understand memory leaks using PHP Meminfo
-----------------------------------------------------------------
-
-[Hunting down memory leaks](doc/hunting_down_memory_leaks.md)
+[Hunting down memory leaks](doc/hunting_down_memory_leaks.md) walks through a real investigation with
+it, step by step.
 
 Other memory debugging tools for PHP
--------------------------------------
- - XDebug (https://xdebug.org/)
-With the trace feature and the memory delta option (tool see XDebug documentation), you can trace function memory usage. You can use the provided script to get an aggregated view (TODO link)
+------------------------------------
 
- - PHP Memprof (https://github.com/arnaud-lb/php-memory-profiler)
-Provides aggregated data about memory usage by functions. Far less resource intensive than a full trace from XDebug.
+- [Xdebug](https://xdebug.org/): its trace feature with memory deltas shows memory usage per function.
+- [PHP Memprof](https://github.com/arnaud-lb/php-memory-profiler): aggregated memory usage by
+  function, far less resource intensive than a full Xdebug trace.
 
-Troubleshooting
----------------
-## "A lot of memory usage is reported by the `memory_usage` entry, but the cumulative size of the items in the summary is far lower than the memory usage"
+FAQ
+---
 
-A lot of memory is used internally by the Zend Engine itself to compile PHP files, to run the virtual machine, to execute the garbage collector, etc... Another part of the memory is usually taken by PHP extensions themselves. And the remaining memory usage comes from the PHP data structures from your program.
+### `memory_usage` is much higher than what the dump accounts for
 
-In some cases, several hundred megabytes can be used internally by some PHP extensions. Examples are the PDO extension and MySQLi extension.
-By default, when executing a SQL query they will buffer all the results inside the PHP memory:
-http://php.net/manual/en/mysqlinfo.concepts.buffering.php
+A lot of memory is used by the Zend Engine itself (compiled code, the virtual machine, the garbage
+collector) and by extensions. PDO and mysqli, for example, buffer whole result sets in PHP memory by
+default ([buffering](https://www.php.net/manual/en/mysqlinfo.concepts.buffering.php)), and image
+extensions hold large buffers. All of it goes through the Zend Memory Manager, so it counts towards
+`memory_get_usage()` and `memory_limit`, but meminfo only sees the data structures of your program,
+not the extensions' own memory. Hence the gap, which can be large.
 
-In case of very large number of results, this will consume a lot of memory, and this memory usage is not caused by the data you have in your objects or array manipulated by your program, but by the way the extension works.
+### "Call to undefined function" when calling `meminfo_dump`
 
-This is only one example, but the same can happen with image manipulation extensions, that will use a lot of memory to transform images.
+The extension is not enabled. Look for the meminfo section in `php -i` (or a `phpinfo()` page) and
+check the `extension=meminfo.so` line of the `php.ini` that PHP actually loads (`php --ini`).
 
-All the extensions are using the Zend Memory Manager, so that they will not exceed the maximum memory limit set for the PHP process. So their memory usage is included in the information provided by `memory_get_usage()`.
+### Why are most tests "skipped"?
 
-But PHP Meminfo is only able to get information on memory used by the data structure from the PHP program, not from the extensions themselves.
-
-Hence the difference between those numbers, which can be quite big.
-
-## "Call to undefined function" when calling `meminfo_dump`
-This means the extension is not enabled.
-
-Check the PHP Info output and look for the MemInfo data.
-
-To see the PHP Info output, just create a page calling the `phpinfo();` function, and load it from your browser, or call `php -i` from the command line.
-
-## Why most tests are "skipped"?
-
-While doing a `make test`, some tests will need JSON capabilities. But the
-compilation system generates a clean env by removing all configuration
-directives that load extensions.
-So if JSON capabilites are packaged as a separate extension (instead of
-being compiled directly in the PHP runtime), the tests will be skipped.
-
-You may run them with the `run-tests.php` generated after the `make test`
-command, by providing the `php` executable:
+The tests need JSON support, but `make test` runs them in a clean environment that loads no shared
+extensions. If JSON is built as a separate extension (common before PHP 8), they are skipped. Run them
+with your own configuration from the `extension` directory:
 
 ```bash
 $ TEST_PHP_EXECUTABLE=$(which php) $(which php) run-tests.php -d extension=$PWD/modules/meminfo.so
-
 ```
-In this case your tests will run with your local PHP configuration,
-including the loading of the JSON extension.
 
-Please note this is not required when working with PHP 8 as the JSON functions are now
-usually complied in PHP directly.
+More on building and testing in [Development](doc/development.md).
 
 Credits
 -------
-Thanks to Derick Rethans for his inspirational work on the essential XDebug. See http://www.xdebug.org/
+
+Thanks to Derick Rethans for his inspirational work on the essential Xdebug. See https://xdebug.org/

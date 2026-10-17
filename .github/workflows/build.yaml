@@ -1,4 +1,4 @@
-name: Build the extension and test the analyzers
+name: Build and test the extension
 
 on: push
 
@@ -117,8 +117,30 @@ jobs:
             extension/tests/*.out
             extension/tests/*.diff
 
-      - name: Test the analyzers
+  # ext-swoole, so the Swoole tests run instead of skipping, plus the coroutine
+  # scenarios of tools/repro/swoole (dumps from inside a coroutine, 10 000
+  # suspended coroutines, dump-meminfo on a coroutine loop). Built in the same
+  # image as `make repro-swoole` locally.
+  swoole:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        php-versions: ['8.1', '8.3', '8.5']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # An explicit shell turns on pipefail, so a failing test still fails the step.
+      - name: Test the extension with ext-swoole loaded
+        shell: bash
+        run: make repro-swoole-test PHP_VERSION=${{ matrix.php-versions }} | tee run-tests.log
+
+      # A swoole.so that fails to load makes these tests skip, not fail.
+      - name: Check that the Swoole tests ran
         run: |
-          cd analyzer
-          composer install
-          vendor/bin/phpspec run
+          grep -E '(PASS|FAIL).*dump-swoole_coroutine' run-tests.log
+          grep -E '(PASS|FAIL).*dump-swoole_suspended_coroutines' run-tests.log
+
+      - name: Run the Swoole scenarios
+        run: make repro-swoole PHP_VERSION=${{ matrix.php-versions }}

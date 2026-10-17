@@ -24,6 +24,7 @@
 #endif
 
 #include "ext/standard/info.h"
+#include "ext/standard/basic_functions.h"
 #include "php_ini.h"
 #include "php_open_temporary_file.h"
 
@@ -40,6 +41,10 @@
 #include "zend_object_handlers.h"
 #include "zend_exceptions.h"
 #include "ext/spl/spl_exceptions.h"
+
+#if PHP_VERSION_ID >= 80100
+# include "zend_observer.h"
+#endif
 
 #if PHP_VERSION_ID >= 80000
 ZEND_BEGIN_ARG_INFO_EX(arginfo_meminfo_dump, 0, 0, 1)
@@ -101,7 +106,8 @@ typedef struct {
  * itself is written; the zvals behind them are visited afterwards, which is
  * what this level records. Children come either from a HashTable or, for a
  * plain object whose property table does not exist yet, from a list of
- * declared property slots.
+ * declared property slots — and then, for objects that keep data outside their
+ * properties (closures, generators, SPL containers…), from what get_gc() lists.
  */
 typedef struct {
     HashTable *ht;                      /* children left to visit, NULL when not iterating a table */
@@ -110,6 +116,12 @@ typedef struct {
     meminfo_prop_slot *slots;           /* declared properties, NULL when not iterating slots */
     uint32_t slot_count;
     uint32_t slot_pos;
+
+    HashTable *gc_ht;                   /* children only get_gc() exposes, visited after the above */
+    HashPosition gc_ht_pos;
+    zval *gc_values;                    /* copies of get_gc()'s zvals, owned by a meminfo_gc_block */
+    uint32_t gc_count;
+    uint32_t gc_pos;
 
 #if PHP_VERSION_ID >= 70400
     HashTable *properties_to_release;   /* get_properties() result, released once the subtree is done */
@@ -135,6 +147,21 @@ typedef struct {
 } meminfo_stack;
 
 /**
+ * Copies of the zvals an object's get_gc() handler listed.
+ *
+ * The handler hands back a buffer the engine reuses on the next call, so the
+ * zvals are copied out at once. The copies are kept until the dump ends rather
+ * than until their subtree is done: a scalar item is identified by the address
+ * of its zval, and a freed block whose memory came back for another one would
+ * make new items look already visited.
+ */
+typedef struct meminfo_gc_block {
+    struct meminfo_gc_block *next;
+    uint32_t count;
+    zval values[1];
+} meminfo_gc_block;
+
+/**
  * State threaded through the whole traversal.
  */
 typedef struct {
@@ -143,6 +170,7 @@ typedef struct {
     int first_element;
     meminfo_stack stack;
     int aborted;        /* an allocation outside the stack and the set failed */
+    meminfo_gc_block *gc_blocks;    /* every get_gc() copy made so far, freed at the end */
 } meminfo_context;
 
 /**
@@ -247,29 +275,94 @@ static void meminfo_write_raw(meminfo_writer *w, const char *ptr, size_t len)
 }
 
 /**
- * Append a NUL-terminated string with JSON string escaping.
+ * Length of the well-formed UTF-8 sequence starting at p, or 0 when the bytes
+ * there are not one (stray continuation byte, overlong form, surrogate, value
+ * past U+10FFFF, or a sequence cut short by the end of the input).
  *
- * Only what the format requires is escaped: '"', '\' and the C0 controls as
- * \u00xx. Bytes above 0x1f are passed through untouched, so a non-UTF-8 byte
- * stays exactly as it was found in memory.
+ * Only called for a lead byte of 0x80 or more; ASCII never gets here.
+ */
+static size_t meminfo_utf8_sequence_length(const unsigned char *p, const unsigned char *end)
+{
+    unsigned char c = p[0];
+    unsigned char min = 0x80, max = 0xbf;
+    size_t len, i;
+
+    if (c >= 0xc2 && c <= 0xdf) {
+        len = 2;
+    } else if (c >= 0xe0 && c <= 0xef) {
+        len = 3;
+        if (c == 0xe0) {
+            min = 0xa0;
+        } else if (c == 0xed) {
+            max = 0x9f;
+        }
+    } else if (c >= 0xf0 && c <= 0xf4) {
+        len = 4;
+        if (c == 0xf0) {
+            min = 0x90;
+        } else if (c == 0xf4) {
+            max = 0x8f;
+        }
+    } else {
+        return 0;
+    }
+
+    if ((size_t) (end - p) < len) {
+        return 0;
+    }
+
+    // Only the second byte has a narrowed range; the rest are any continuation.
+    if (p[1] < min || p[1] > max) {
+        return 0;
+    }
+    for (i = 2; i < len; i++) {
+        if (p[i] < 0x80 || p[i] > 0xbf) {
+            return 0;
+        }
+    }
+
+    return len;
+}
+
+/**
+ * Append len bytes with JSON string escaping, so that the result is always
+ * valid JSON whatever the bytes are.
+ *
+ * '"', '\' and the C0 controls (NUL included) are escaped as the format
+ * requires. Well-formed UTF-8 is passed through untouched; every byte that is
+ * not part of a well-formed sequence becomes U+FFFD, as json_encode() does with
+ * JSON_INVALID_UTF8_SUBSTITUTE. Without that, one stray byte in one array key
+ * made the whole dump unreadable for json_decode() (#124).
  *
  * Runs of unescaped bytes are copied in one go, which is what makes this a
  * single pass over the input with no allocation at all.
  */
-static void meminfo_write_json_escaped(meminfo_writer *w, const char *s)
+static void meminfo_write_json_escaped_len(meminfo_writer *w, const char *s, size_t len)
 {
     static const char hex_digits[] = "0123456789abcdef";
 
-    const char *run = s;
-    const char *p = s;
+    const unsigned char *start = (const unsigned char *) s;
+    const unsigned char *end = start + len;
+    const unsigned char *run = start;
+    const unsigned char *p = start;
 
-    for (; *p != '\0'; p++) {
-        unsigned char c = (unsigned char) *p;
+    while (p < end) {
+        unsigned char c = *p;
         const char *escape;
         size_t escape_len;
         char unicode[6];
 
-        if (c == '"') {
+        if (c >= 0x80) {
+            size_t sequence = meminfo_utf8_sequence_length(p, end);
+
+            if (sequence > 0) {
+                p += sequence;
+                continue;
+            }
+
+            escape = "\\ufffd";
+            escape_len = 6;
+        } else if (c == '"') {
             escape = "\\\"";
             escape_len = 2;
         } else if (c == '\\') {
@@ -286,20 +379,52 @@ static void meminfo_write_json_escaped(meminfo_writer *w, const char *s)
             escape = unicode;
             escape_len = 6;
         } else {
+            p++;
             continue;
         }
 
         if (p > run) {
-            meminfo_write_raw(w, run, (size_t) (p - run));
+            meminfo_write_raw(w, (const char *) run, (size_t) (p - run));
         }
         meminfo_write_raw(w, escape, escape_len);
 
-        run = p + 1;
+        p++;
+        run = p;
     }
 
     if (p > run) {
-        meminfo_write_raw(w, run, (size_t) (p - run));
+        meminfo_write_raw(w, (const char *) run, (size_t) (p - run));
     }
+}
+
+/**
+ * Append a NUL-terminated string with JSON string escaping.
+ *
+ * For class names, frame labels and type names, which deliberately end at the
+ * first NUL: an anonymous class is named "class@anonymous\0<file>:<line>$<n>",
+ * and cutting it there is what groups its instances under one class.
+ */
+static void meminfo_write_json_escaped(meminfo_writer *w, const char *s)
+{
+    meminfo_write_json_escaped_len(w, s, strlen(s));
+}
+
+/**
+ * Append the name of an array key or a property, unmangled ("\0Class\0name"
+ * becomes "name"), keeping any NUL that is part of the name itself.
+ */
+static void meminfo_write_json_escaped_key(meminfo_writer *w, zend_string *key, zend_bool is_property)
+{
+    if (is_property) {
+        const char *class_name, *property_name;
+        size_t property_len;
+
+        zend_unmangle_property_name_ex(key, &class_name, &property_name, &property_len);
+        meminfo_write_json_escaped_len(w, property_name, property_len);
+        return;
+    }
+
+    meminfo_write_json_escaped_len(w, ZSTR_VAL(key), ZSTR_LEN(key));
 }
 
 /**
@@ -1298,6 +1423,178 @@ static int meminfo_dump_file_is_trustworthy(const char *path, pid_t pid)
 
 #endif /* !PHP_WIN32 */
 
+#if PHP_VERSION_ID >= 80100
+/* ------------------------------------------------------------------------- *
+ * Suspended fiber contexts
+ *
+ * A dump starts from the running frame and walks down its chain. Frames of a
+ * context that is not running are on a stack of their own, reachable only
+ * through whatever suspended them: a Fiber object for native fibers, nothing
+ * at all for Swoole coroutines, which keep their stacks in C++ structures.
+ *
+ * The fiber observers see every switch, native fibers and — with
+ * swoole.enable_fiber_mock=1 — Swoole coroutines alike, so the context being
+ * left is recorded with its top frame, and forgotten again as soon as it runs
+ * or is destroyed. The frames stay valid in between: nothing runs on a stack
+ * while it is suspended.
+ * ------------------------------------------------------------------------- */
+
+static size_t meminfo_ptr_slot(uintptr_t ptr, size_t mask);
+static void meminfo_visit_exec_frame(meminfo_context *ctx, zend_execute_data *start_frame);
+
+static size_t meminfo_suspended_find(const meminfo_suspended_map *map, const void *context)
+{
+    size_t mask = map->capacity - 1;
+    size_t i = meminfo_ptr_slot((uintptr_t) context, mask);
+
+    while (map->slots[i].context != NULL && map->slots[i].context != context) {
+        i = (i + 1) & mask;
+    }
+
+    return i;
+}
+
+static void meminfo_suspended_remove(meminfo_suspended_map *map, const void *context)
+{
+    size_t mask, i, j;
+
+    if (map->count == 0) {
+        return;
+    }
+
+    mask = map->capacity - 1;
+    i = meminfo_suspended_find(map, context);
+    if (map->slots[i].context == NULL) {
+        return;
+    }
+
+    // Backward-shift deletion: pull later entries of the same probe run into
+    // the hole, so that lookups never need tombstones.
+    j = i;
+    for (;;) {
+        size_t home;
+
+        j = (j + 1) & mask;
+        if (map->slots[j].context == NULL) {
+            break;
+        }
+
+        home = meminfo_ptr_slot((uintptr_t) map->slots[j].context, mask);
+        if ((i <= j) ? (home <= i || home > j) : (home <= i && home > j)) {
+            map->slots[i] = map->slots[j];
+            i = j;
+        }
+    }
+
+    map->slots[i].context = NULL;
+    map->slots[i].frame = NULL;
+    map->count--;
+}
+
+static int meminfo_suspended_grow(meminfo_suspended_map *map)
+{
+    size_t capacity = map->capacity ? map->capacity * 2 : 64;
+    meminfo_suspended_context *old = map->slots;
+    size_t old_capacity = map->capacity;
+    size_t i;
+
+    map->slots = calloc(capacity, sizeof(*map->slots));
+    if (map->slots == NULL) {
+        map->slots = old;
+        return 0;
+    }
+    map->capacity = capacity;
+
+    for (i = 0; i < old_capacity; i++) {
+        if (old[i].context != NULL) {
+            map->slots[meminfo_suspended_find(map, old[i].context)] = old[i];
+        }
+    }
+
+    free(old);
+    return 1;
+}
+
+static void meminfo_suspended_put(meminfo_suspended_map *map, void *context, void *frame)
+{
+    size_t i;
+
+    // Kept at most half full.
+    if ((map->count + 1) * 2 > map->capacity && !meminfo_suspended_grow(map)) {
+        // Out of memory: that context will be missing from dumps, nothing worse.
+        return;
+    }
+
+    i = meminfo_suspended_find(map, context);
+    if (map->slots[i].context == NULL) {
+        map->slots[i].context = context;
+        map->count++;
+    }
+    map->slots[i].frame = frame;
+}
+
+/**
+ * Whether ex lies on the VM stack in use. Swoole announces a new coroutine
+ * with a frame of its own on the C stack, gone once the switch returns; only
+ * frames on a VM stack outlive it.
+ */
+static int meminfo_frame_on_vm_stack(const zend_execute_data *ex)
+{
+    zend_vm_stack page;
+
+    for (page = EG(vm_stack); page != NULL; page = page->prev) {
+        if ((const zval *) ex >= ZEND_VM_STACK_ELEMENTS(page) && (const zval *) ex < page->end) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void meminfo_fiber_switch(zend_fiber_context *from, zend_fiber_context *to)
+{
+    meminfo_suspended_map *map = &MEMINFO_G(suspended);
+
+    if (to != NULL) {
+        meminfo_suspended_remove(map, to);
+    }
+    if (from == NULL) {
+        return;
+    }
+
+    meminfo_suspended_remove(map, from);
+
+    if (from->status == ZEND_FIBER_STATUS_DEAD
+        || EG(current_execute_data) == NULL
+        || !meminfo_frame_on_vm_stack(EG(current_execute_data))) {
+        return;
+    }
+
+    meminfo_suspended_put(map, from, EG(current_execute_data));
+}
+
+static void meminfo_fiber_destroy(zend_fiber_context *context)
+{
+    meminfo_suspended_remove(&MEMINFO_G(suspended), context);
+}
+
+/**
+ * Walk the frames of every suspended context. Frames a Fiber object leads to
+ * as well are skipped the second time, by address.
+ */
+static void meminfo_visit_suspended_contexts(meminfo_context *ctx)
+{
+    meminfo_suspended_map *map = &MEMINFO_G(suspended);
+    size_t i;
+
+    for (i = 0; i < map->capacity && !meminfo_aborted(ctx); i++) {
+        if (map->slots[i].context != NULL) {
+            meminfo_visit_exec_frame(ctx, (zend_execute_data *) map->slots[i].frame);
+        }
+    }
+}
+#endif
+
 static PHP_GINIT_FUNCTION(meminfo)
 {
 #if defined(COMPILE_DL_MEMINFO) && defined(ZTS)
@@ -1306,9 +1603,26 @@ static PHP_GINIT_FUNCTION(meminfo)
     memset(meminfo_globals, 0, sizeof(*meminfo_globals));
 }
 
+static PHP_GSHUTDOWN_FUNCTION(meminfo)
+{
+#if PHP_VERSION_ID >= 80100
+    free(meminfo_globals->suspended.slots);
+    meminfo_globals->suspended.slots = NULL;
+    meminfo_globals->suspended.capacity = 0;
+    meminfo_globals->suspended.count = 0;
+#else
+    (void) meminfo_globals;
+#endif
+}
+
 static PHP_MINIT_FUNCTION(meminfo)
 {
     REGISTER_INI_ENTRIES();
+
+#if PHP_VERSION_ID >= 80100
+    zend_observer_fiber_switch_register(meminfo_fiber_switch);
+    zend_observer_fiber_destroy_register(meminfo_fiber_destroy);
+#endif
 
 #ifndef PHP_WIN32
     {
@@ -1397,6 +1711,15 @@ static PHP_RSHUTDOWN_FUNCTION(meminfo)
     meminfo_restore_signal_handler();
 #endif
 
+#if PHP_VERSION_ID >= 80100
+    // Every context of the request is gone with it. The slots are kept for the
+    // next request and freed with the globals.
+    if (MEMINFO_G(suspended).count > 0) {
+        memset(MEMINFO_G(suspended).slots, 0, MEMINFO_G(suspended).capacity * sizeof(meminfo_suspended_context));
+        MEMINFO_G(suspended).count = 0;
+    }
+#endif
+
     return SUCCESS;
 }
 
@@ -1426,9 +1749,13 @@ static PHP_MINFO_FUNCTION(meminfo)
 
 static void meminfo_visit_exec_frame(meminfo_context *ctx, zend_execute_data *start_frame);
 static void meminfo_browse_class_static_members(meminfo_context *ctx);
+static void meminfo_browse_function_static_variables(meminfo_context *ctx);
+static void meminfo_browse_callbacks(meminfo_context *ctx);
+static void meminfo_browse_constants(meminfo_context *ctx);
 static void meminfo_browse_zvals_from_symbol_table(meminfo_context *ctx, char *frame_label, HashTable *symbol_table);
 static void meminfo_zval_dump(meminfo_context *ctx, char *frame_label, zend_string *symbol_name, zval *zv);
 static void meminfo_hash_write_children(meminfo_context *ctx, HashTable *ht, zend_bool is_object);
+static void meminfo_hash_write_entries(meminfo_context *ctx, HashTable *ht, zend_bool is_object, int *first_child);
 
 zend_module_entry meminfo_module_entry = {
     STANDARD_MODULE_HEADER,
@@ -1442,7 +1769,7 @@ zend_module_entry meminfo_module_entry = {
     MEMINFO_VERSION,
     PHP_MODULE_GLOBALS(meminfo),
     PHP_GINIT(meminfo),
-    NULL,                           /* globals shutdown */
+    PHP_GSHUTDOWN(meminfo),
     NULL,                           /* post deactivate */
     STANDARD_MODULE_PROPERTIES_EX
 };
@@ -1452,6 +1779,124 @@ zend_module_entry meminfo_module_entry = {
  * Generate a JSON output of the list of items in memory (objects, arrays, string, etc...)
  * with their sizes and other information
  */
+/**
+ * Pick how meminfo_dump() writes to the caller's stream.
+ *
+ * Nothing may run PHP code, or switch to another coroutine, while the heap is
+ * being walked: the traversal holds raw pointers into hash tables that such
+ * code could free or resize. A php_stream write can do either — a userspace
+ * stream wrapper runs its stream_write() method, and Swoole's file and socket
+ * hooks yield to other coroutines (seen in 54 of 90 dumps under
+ * SWOOLE_HOOK_ALL, the likely cause of GitHub issue #117). So:
+ *
+ *  - php://memory and php://temp are written through the stream, as they
+ *    neither run code nor yield (and are what tests dump into);
+ *  - a stream over a regular file, with no write filter, is written with
+ *    write(2) on its descriptor — Swoole's hooked file streams included, which
+ *    are not PHP_STREAM_IS_STDIO but still hand out their descriptor;
+ *  - anything else (sockets, pipes, filtered or compressed streams, userspace
+ *    wrappers, whose very cast would run PHP code) goes to an anonymous
+ *    temporary file first, copied into the stream once the walk is over. The
+ *    dump is never held in memory.
+ *
+ * Without a temporary file the stream is written directly, as before.
+ */
+static void meminfo_dump_target_open(meminfo_writer *w, php_stream *stream, FILE **spool)
+{
+#ifndef PHP_WIN32
+    int fd = -1;
+    struct stat info;
+
+    if (php_stream_is(stream, PHP_STREAM_IS_MEMORY) || php_stream_is(stream, PHP_STREAM_IS_TEMP)) {
+        w->stream = stream;
+        return;
+    }
+
+    // The stream's own cast handler, not php_stream_cast(): that one also
+    // seeks through the stream's ops to drop its read buffer, and under
+    // Swoole's file hook such a seek is a coroutine operation that yields.
+    if (!php_stream_is(stream, PHP_STREAM_IS_USERSPACE)
+        && stream->writefilters.head == NULL
+        && stream->ops->cast != NULL
+        && stream->ops->cast(stream, PHP_STREAM_AS_FD, (void **) &fd) == SUCCESS
+        && fd >= 0
+        && fstat(fd, &info) == 0
+        && S_ISREG(info.st_mode)) {
+        // What php_stream_cast() does before handing out a descriptor: write
+        // out what the stream buffers, and put the descriptor where the stream
+        // thinks it is (a read buffer leaves it further on), with plain lseek.
+        php_stream_flush(stream);
+        if (lseek(fd, (off_t) stream->position, SEEK_SET) >= 0) {
+            stream->readpos = 0;
+            stream->writepos = 0;
+            w->fd = fd;
+            return;
+        }
+    }
+
+    *spool = tmpfile();
+    if (*spool != NULL) {
+        w->fd = fileno(*spool);
+        return;
+    }
+#else
+    (void) spool;
+#endif
+
+    w->stream = stream;
+}
+
+/**
+ * Finish what meminfo_dump_target_open() started, once the walk is over.
+ */
+static void meminfo_dump_target_close(meminfo_writer *w, php_stream *stream, FILE *spool)
+{
+#ifndef PHP_WIN32
+    if (spool != NULL) {
+        int fd = fileno(spool);
+
+        // The staging buffer is free again: reuse it for the copy.
+        if (!w->err && lseek(fd, 0, SEEK_SET) == 0) {
+            ssize_t got;
+
+            while ((got = read(fd, w->buf, sizeof(w->buf))) != 0) {
+                if (got < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    w->err = 1;
+                    break;
+                }
+                if ((ssize_t) php_stream_write(stream, w->buf, (size_t) got) != got) {
+                    w->err = 1;
+                    break;
+                }
+            }
+        } else {
+            w->err = 1;
+        }
+
+        fclose(spool);
+        return;
+    }
+
+    if (w->fd >= 0) {
+        // Written behind the stream's back: move its idea of the position to
+        // where the descriptor is now, so that ftell() and further writes
+        // agree. Pipes and the like have no position to keep.
+        off_t position = lseek(w->fd, 0, SEEK_CUR);
+
+        if (position >= 0) {
+            stream->position = (zend_off_t) position;
+        }
+    }
+#else
+    (void) w;
+    (void) stream;
+    (void) spool;
+#endif
+}
+
 PHP_FUNCTION(meminfo_dump)
 {
     zval *zval_stream;
@@ -1459,6 +1904,7 @@ PHP_FUNCTION(meminfo_dump)
     php_stream *stream;
     meminfo_writer *writer;
     zend_execute_data *caller_frame;
+    FILE *spool = NULL;
     int failed;
 
     // No throw here: PHP 8 has already thrown a TypeError or ArgumentCountError
@@ -1478,18 +1924,23 @@ PHP_FUNCTION(meminfo_dump)
         return;
     }
 
-    writer->stream = stream;
+    writer->stream = NULL;
     writer->fd = -1;
     writer->len = 0;
     writer->err = 0;
+
+    meminfo_dump_target_open(writer, stream, &spool);
 
     // The frame of the meminfo_dump() call itself holds no user variables; the
     // dump starts at its caller.
     caller_frame = EG(current_execute_data) ? EG(current_execute_data)->prev_execute_data : NULL;
 
-    // The global scope is reachable through the main script's frame here, so
-    // walking EG(symbol_table) separately would only repeat work.
-    meminfo_dump_to_writer(writer, caller_frame, 0);
+    // The global scope is not always on the caller's chain: a coroutine of
+    // Swoole starts a frame chain of its own. When it is, its variables are
+    // already recorded by then and skipped by address.
+    meminfo_dump_to_writer(writer, caller_frame, 1);
+
+    meminfo_dump_target_close(writer, stream, spool);
 
     failed = writer->err;
     free(writer);
@@ -1562,6 +2013,9 @@ static int meminfo_level_is_pending(const meminfo_level *level)
     if (level->slots) {
         return 1;
     }
+    if (level->gc_ht || level->gc_values) {
+        return 1;
+    }
 #if PHP_VERSION_ID >= 70400
     if (level->properties_to_release) {
         return 1;
@@ -1590,6 +2044,7 @@ void meminfo_dump_to_writer(meminfo_writer *w, zend_execute_data *start_frame, i
     ctx.stack.capacity = 0;
     ctx.stack.exhausted = 0;
     ctx.aborted = 0;
+    ctx.gc_blocks = NULL;
 
     MEMINFO_WRITE_LIT(w, "{\n");
 
@@ -1606,6 +2061,9 @@ void meminfo_dump_to_writer(meminfo_writer *w, zend_execute_data *start_frame, i
 
     MEMINFO_WRITE_LIT(w, "  \"items\": {\n");
     meminfo_visit_exec_frame(&ctx, start_frame);
+#if PHP_VERSION_ID >= 80100
+    meminfo_visit_suspended_contexts(&ctx);
+#endif
 
     if (include_global_symbol_table) {
         char global_label[] = "<GLOBAL>";
@@ -1616,6 +2074,9 @@ void meminfo_dump_to_writer(meminfo_writer *w, zend_execute_data *start_frame, i
     }
 
     meminfo_browse_class_static_members(&ctx);
+    meminfo_browse_function_static_variables(&ctx);
+    meminfo_browse_callbacks(&ctx);
+    meminfo_browse_constants(&ctx);
 
     // Every item leaves its body open without a trailing newline: close the
     // last one here, if there was one, then "items" and the document.
@@ -1628,6 +2089,13 @@ void meminfo_dump_to_writer(meminfo_writer *w, zend_execute_data *start_frame, i
 
     free(ctx.stack.levels);
     free(ctx.visited_items.slots);
+
+    while (ctx.gc_blocks) {
+        meminfo_gc_block *next = ctx.gc_blocks->next;
+
+        free(ctx.gc_blocks);
+        ctx.gc_blocks = next;
+    }
 }
 
 /**
@@ -1656,7 +2124,9 @@ static void meminfo_visit_exec_frame(meminfo_context *ctx, zend_execute_data *st
             goto handle_next;
         }
 
-        if (exec_frame->prev_execute_data) {
+        // A frame with nothing below it is the main script — or the first
+        // frame of a coroutine (OpenSwoole), which still has a function name.
+        if (exec_frame->prev_execute_data || exec_frame->func->common.function_name) {
             meminfo_build_frame_label(frame_label, sizeof(frame_label), exec_frame);
         } else {
             snprintf(frame_label, sizeof(frame_label), "<GLOBAL>");
@@ -1759,6 +2229,250 @@ static void meminfo_browse_class_static_members(meminfo_context *ctx)
 
         zend_hash_move_forward_ex(CG(class_table), &ce_pos);
     }
+}
+
+/**
+ * Dump one root that lives outside any frame, symbol table or class, under a
+ * symbol name made up on the spot. Undefined slots are skipped.
+ */
+static void meminfo_dump_named_root(meminfo_context *ctx, char *frame_label, const char *name, zval *zv)
+{
+    zend_string *symbol_name;
+
+    if (zv == NULL || Z_TYPE_P(zv) == IS_UNDEF || meminfo_aborted(ctx)) {
+        return;
+    }
+
+    symbol_name = zend_string_init(name, strlen(name), 0);
+    meminfo_zval_dump(ctx, frame_label, symbol_name, zv);
+    zend_string_release(symbol_name);
+}
+
+#if PHP_VERSION_ID >= 80500
+/**
+ * Same, for a root the engine keeps as a bare zend_object. Objects are
+ * identified by their zend_object, so a zval on the C stack is enough.
+ */
+static void meminfo_dump_named_object_root(meminfo_context *ctx, char *frame_label, const char *name, zend_object *object)
+{
+    zval holder;
+
+    if (object == NULL) {
+        return;
+    }
+
+    ZVAL_OBJ(&holder, object);
+    meminfo_dump_named_root(ctx, frame_label, name, &holder);
+}
+#endif
+
+/**
+ * Walk the static variables of one user function or method.
+ *
+ * Only refcounted values are dumped: a variable that never ran its static
+ * declaration still holds its scalar default, and a counter or a flag would
+ * add a root per function without holding anything.
+ */
+static void meminfo_browse_static_variables_of(meminfo_context *ctx, zend_class_entry *scope, zend_function *func)
+{
+    char frame_label[] = "<STATIC_VARIABLE>";
+    char symbol_name[500];
+    HashTable *statics;
+    zend_string *var_name;
+    zval *value;
+
+    if (func->type != ZEND_USER_FUNCTION) {
+        return;
+    }
+
+#if PHP_VERSION_ID >= 70400
+    // NULL until the function has run once.
+    statics = ZEND_MAP_PTR(func->op_array.static_variables_ptr) ? ZEND_MAP_PTR_GET(func->op_array.static_variables_ptr) : NULL;
+#else
+    statics = func->op_array.static_variables;
+#endif
+    if (statics == NULL) {
+        return;
+    }
+
+    ZEND_HASH_FOREACH_STR_KEY_VAL(statics, var_name, value) {
+        if (meminfo_aborted(ctx)) {
+            break;
+        }
+        if (var_name == NULL || !Z_REFCOUNTED_P(value)) {
+            continue;
+        }
+#if PHP_VERSION_ID < 70400
+        // Before 7.4 the table exists from compile time and holds the
+        // declared defaults; a variable is bound (a reference) once it ran.
+        if (!Z_ISREF_P(value)) {
+            continue;
+        }
+#endif
+
+        if (scope) {
+            snprintf(symbol_name, sizeof(symbol_name), "%s::%s()::$%s",
+                ZSTR_VAL(scope->name), ZSTR_VAL(func->common.function_name), ZSTR_VAL(var_name));
+        } else {
+            snprintf(symbol_name, sizeof(symbol_name), "%s()::$%s",
+                ZSTR_VAL(func->common.function_name), ZSTR_VAL(var_name));
+        }
+
+        meminfo_dump_named_root(ctx, frame_label, symbol_name, value);
+    } ZEND_HASH_FOREACH_END();
+}
+
+/**
+ * Walk the static variables of every user function and method (GitHub issue
+ * #75). Those of closures belong to each closure object and are reached
+ * through it.
+ */
+static void meminfo_browse_function_static_variables(meminfo_context *ctx)
+{
+    zend_function *func;
+    zend_class_entry *class_entry;
+
+    ZEND_HASH_FOREACH_PTR(CG(function_table), func) {
+        if (meminfo_aborted(ctx)) {
+            return;
+        }
+        meminfo_browse_static_variables_of(ctx, NULL, func);
+    } ZEND_HASH_FOREACH_END();
+
+    // An inherited method may share its statics with the parent's: the copy
+    // seen second is skipped by address.
+    ZEND_HASH_FOREACH_PTR(CG(class_table), class_entry) {
+        if (class_entry->type != ZEND_USER_CLASS) {
+            continue;
+        }
+        ZEND_HASH_FOREACH_PTR(&class_entry->function_table, func) {
+            if (meminfo_aborted(ctx)) {
+                return;
+            }
+            meminfo_browse_static_variables_of(ctx, class_entry, func);
+        } ZEND_HASH_FOREACH_END();
+    } ZEND_HASH_FOREACH_END();
+}
+
+/**
+ * Dump the handlers stacked by nested set_error_handler() or
+ * set_exception_handler() calls, oldest first.
+ */
+static void meminfo_browse_handler_stack(meminfo_context *ctx, char *frame_label, const char *name, zend_stack *stack)
+{
+    char symbol_name[128];
+    zval *handlers = (zval *) zend_stack_base(stack);
+    int count = zend_stack_count(stack);
+    int i;
+
+    for (i = 0; handlers != NULL && i < count; i++) {
+        snprintf(symbol_name, sizeof(symbol_name), "%s[%d]", name, i);
+        meminfo_dump_named_root(ctx, frame_label, symbol_name, &handlers[i]);
+    }
+}
+
+/**
+ * Dump callables the engine holds on to for later (GitHub issue #78): error
+ * and exception handlers, shutdown functions with their arguments, and user
+ * output-buffer handlers. A closure registered there keeps everything it uses
+ * alive, often as the only reference left.
+ *
+ * Not covered: spl_autoload_register() callbacks. SPL keeps them in a table
+ * that is private to ext/spl, and the only way to list them is to call
+ * spl_autoload_functions(), which a dump must not do.
+ */
+static void meminfo_browse_callbacks(meminfo_context *ctx)
+{
+    char frame_label[] = "<CALLBACK>";
+    char symbol_name[128];
+
+    meminfo_dump_named_root(ctx, frame_label, "set_error_handler", &EG(user_error_handler));
+    meminfo_browse_handler_stack(ctx, frame_label, "set_error_handler", &EG(user_error_handlers));
+    meminfo_dump_named_root(ctx, frame_label, "set_exception_handler", &EG(user_exception_handler));
+    meminfo_browse_handler_stack(ctx, frame_label, "set_exception_handler", &EG(user_exception_handlers));
+
+    if (BG(user_shutdown_function_names)) {
+        php_shutdown_function_entry *entry;
+        uint32_t index = 0;
+
+        ZEND_HASH_FOREACH_PTR(BG(user_shutdown_function_names), entry) {
+            zval *args = NULL;
+            uint32_t arg_count = 0, i;
+
+            if (meminfo_aborted(ctx)) {
+                return;
+            }
+
+            snprintf(symbol_name, sizeof(symbol_name), "register_shutdown_function[%u]", index);
+#if PHP_VERSION_ID >= 80500
+            meminfo_dump_named_object_root(ctx, frame_label, symbol_name,
+                entry->fci_cache.closure ? entry->fci_cache.closure : entry->fci_cache.object);
+            args = entry->params;
+            arg_count = entry->param_count;
+#elif PHP_VERSION_ID >= 80100
+            meminfo_dump_named_root(ctx, frame_label, symbol_name, &entry->fci.function_name);
+            args = entry->fci.params;
+            arg_count = entry->fci.param_count;
+#elif PHP_VERSION_ID >= 80000
+            meminfo_dump_named_root(ctx, frame_label, symbol_name, &entry->function_name);
+            args = entry->arguments;
+            arg_count = (uint32_t) entry->arg_count;
+#else
+            // The callable is the first "argument".
+            if (entry->arg_count > 0) {
+                meminfo_dump_named_root(ctx, frame_label, symbol_name, &entry->arguments[0]);
+                args = entry->arguments + 1;
+                arg_count = (uint32_t) entry->arg_count - 1;
+            }
+#endif
+            for (i = 0; args != NULL && i < arg_count; i++) {
+                snprintf(symbol_name, sizeof(symbol_name), "register_shutdown_function[%u]($%u)", index, i);
+                meminfo_dump_named_root(ctx, frame_label, symbol_name, &args[i]);
+            }
+
+            index++;
+        } ZEND_HASH_FOREACH_END();
+    }
+
+    if (OG(handlers).elements) {
+        php_output_handler **handlers = (php_output_handler **) zend_stack_base(&OG(handlers));
+        int count = zend_stack_count(&OG(handlers));
+        int i;
+
+        for (i = 0; handlers != NULL && i < count; i++) {
+            if (handlers[i] && (handlers[i]->flags & PHP_OUTPUT_HANDLER_USER) && handlers[i]->func.user) {
+                snprintf(symbol_name, sizeof(symbol_name), "ob_start[%d]", i);
+                meminfo_dump_named_root(ctx, frame_label, symbol_name, &handlers[i]->func.user->zoh);
+            }
+        }
+    }
+}
+
+/**
+ * Dump user constants holding values of their own (const X = new Foo since
+ * PHP 8.1, define() with a string or an array built at runtime). Constants of
+ * PHP itself and of extensions stay out of the dump.
+ */
+static void meminfo_browse_constants(meminfo_context *ctx)
+{
+    char frame_label[] = "<CONSTANT>";
+    zend_constant *constant;
+
+    ZEND_HASH_FOREACH_PTR(EG(zend_constants), constant) {
+        if (meminfo_aborted(ctx)) {
+            return;
+        }
+#if PHP_VERSION_ID >= 70300
+        if (ZEND_CONSTANT_MODULE_NUMBER(constant) != PHP_USER_CONSTANT) {
+#else
+        if (constant->module_number != PHP_USER_CONSTANT) {
+#endif
+            continue;
+        }
+        if (constant->name && Z_REFCOUNTED(constant->value)) {
+            meminfo_dump_named_root(ctx, frame_label, ZSTR_VAL(constant->name), &constant->value);
+        }
+    } ZEND_HASH_FOREACH_END();
 }
 
 static void meminfo_browse_zvals_from_symbol_table(meminfo_context *ctx, char *frame_label, HashTable *p_symbol_table)
@@ -1967,6 +2681,18 @@ static void meminfo_children_close(meminfo_context *ctx, int first_child)
 
 static void meminfo_hash_write_children(meminfo_context *ctx, HashTable *ht, zend_bool is_object)
 {
+    int first_child = 1;
+
+    MEMINFO_WRITE_LIT(ctx->w, "        \"children\" : {");
+    meminfo_hash_write_entries(ctx, ht, is_object, &first_child);
+    meminfo_children_close(ctx, first_child);
+}
+
+/**
+ * Write one "children" entry per element of ht, into a block already open.
+ */
+static void meminfo_hash_write_entries(meminfo_context *ctx, HashTable *ht, zend_bool is_object, int *first_child)
+{
     meminfo_writer *w = ctx->w;
     zval *entry;
 
@@ -1974,28 +2700,16 @@ static void meminfo_hash_write_children(meminfo_context *ctx, HashTable *ht, zen
     HashPosition pos;
     zend_ulong num_key;
 
-    int first_child = 1;
-
-    MEMINFO_WRITE_LIT(w, "        \"children\" : {");
-
     zend_hash_internal_pointer_reset_ex(ht, &pos);
     while ((entry = zend_hash_get_current_data_ex(ht, &pos)) != NULL) {
         const void *child = meminfo_child_identity(entry);
 
-        meminfo_child_entry_open(ctx, &first_child);
+        meminfo_child_entry_open(ctx, first_child);
 
         switch (zend_hash_get_current_key_ex(ht, &key, &num_key, &pos)) {
             case HASH_KEY_IS_STRING:
 
-                if (is_object) {
-                    const char *property_name, *class_name;
-
-                    zend_unmangle_property_name(key, &class_name, &property_name);
-
-                    meminfo_write_json_escaped(w, property_name);
-                } else {
-                    meminfo_write_json_escaped(w, ZSTR_VAL(key));
-                }
+                meminfo_write_json_escaped_key(w, key, is_object);
 
                 break;
             case HASH_KEY_IS_LONG:
@@ -2010,7 +2724,6 @@ static void meminfo_hash_write_children(meminfo_context *ctx, HashTable *ht, zen
 
         zend_hash_move_forward_ex(ht, &pos);
     }
-    meminfo_children_close(ctx, first_child);
 }
 
 /**
@@ -2186,27 +2899,111 @@ static int meminfo_collect_declared_properties(zend_object *zobj, meminfo_prop_s
  * Mirrors the object branch of meminfo_hash_write_children() so that both
  * sources of children produce the same bytes.
  */
-static void meminfo_slots_write_children(meminfo_context *ctx, meminfo_prop_slot *slots, uint32_t count)
+/**
+ * Write one "children" entry per declared property slot, into a block already
+ * open.
+ */
+static void meminfo_slots_write_entries(meminfo_context *ctx, meminfo_prop_slot *slots, uint32_t count, int *first_child)
 {
-    meminfo_writer *w = ctx->w;
     uint32_t i;
-    int first_child = 1;
-
-    MEMINFO_WRITE_LIT(w, "        \"children\" : {");
 
     for (i = 0; i < count; i++) {
         const void *child = meminfo_child_identity(slots[i].value);
-        const char *property_name, *class_name;
 
-        meminfo_child_entry_open(ctx, &first_child);
+        meminfo_child_entry_open(ctx, first_child);
 
-        zend_unmangle_property_name(slots[i].name, &class_name, &property_name);
-        meminfo_write_json_escaped(w, property_name);
+        meminfo_write_json_escaped_key(ctx->w, slots[i].name, 1);
 
         meminfo_child_entry_close(ctx, child);
     }
+}
 
-    meminfo_children_close(ctx, first_child);
+/**
+ * Add what an object holds outside its properties to its "children" block,
+ * and record it in level to be visited after the properties.
+ *
+ * Closures (bound $this, use variables, static variables), generators (the
+ * locals of a suspended generator), SPL containers (ArrayObject storage,
+ * SplObjectStorage, SplDoublyLinkedList, SplHeap, SplFixedArray), WeakMap
+ * values and objects of other extensions expose that data only to the garbage
+ * collector, through get_gc(). Objects using the standard handler have nothing
+ * there that their properties do not already show, so it is not called for
+ * them, nor for a Fiber, whose frames are walked as frames of their own.
+ *
+ * get_gc() handlers are engine or extension code; none of them runs PHP code.
+ * Entries from the returned table keep their keys (a closure's variable names);
+ * the loose zvals are named "[0]", "[1]"… in the order the handler gave them.
+ */
+static void meminfo_object_write_gc_entries(meminfo_context *ctx, zval *zv, HashTable *properties, meminfo_level *level, int *first_child)
+{
+    zend_object *zobj = Z_OBJ_P(zv);
+    zval *table = NULL;
+    int n = 0;
+    HashTable *gc_ht;
+
+    if (zobj->handlers->get_gc == NULL || zobj->handlers->get_gc == std_object_handlers.get_gc) {
+        return;
+    }
+#if PHP_VERSION_ID >= 80100
+    if (zobj->ce == zend_ce_fiber) {
+        return;
+    }
+#endif
+
+#if PHP_VERSION_ID >= 80000
+    gc_ht = zobj->handlers->get_gc(zobj, &table, &n);
+#else
+    gc_ht = zobj->handlers->get_gc(zv, &table, &n);
+#endif
+
+    // Copy the loose zvals before anything else can call a get_gc() handler:
+    // on PHP 8 most of them fill one buffer shared by the whole engine.
+    if (table != NULL && n > 0) {
+        meminfo_gc_block *block;
+        int i;
+
+        block = malloc(sizeof(meminfo_gc_block) + (size_t) (n - 1) * sizeof(zval));
+        if (block == NULL) {
+            ctx->aborted = 1;
+            return;
+        }
+
+        block->count = 0;
+        for (i = 0; i < n; i++) {
+            // Only refcounted values can lead anywhere or take up memory of
+            // their own; the rest would be noise.
+            if (Z_REFCOUNTED(table[i])) {
+                ZVAL_COPY_VALUE(&block->values[block->count], &table[i]);
+                block->count++;
+            }
+        }
+
+        block->next = ctx->gc_blocks;
+        ctx->gc_blocks = block;
+
+        if (block->count > 0) {
+            uint32_t k;
+
+            for (k = 0; k < block->count; k++) {
+                meminfo_child_entry_open(ctx, first_child);
+                MEMINFO_WRITE_LIT(ctx->w, "[");
+                meminfo_write_int(ctx->w, (int64_t) k);
+                MEMINFO_WRITE_LIT(ctx->w, "]");
+                meminfo_child_entry_close(ctx, meminfo_child_identity(&block->values[k]));
+            }
+
+            level->gc_values = block->values;
+            level->gc_count = block->count;
+        }
+    }
+
+    // The standard properties table again, for handlers that start from it.
+    if (gc_ht != NULL && gc_ht != properties && gc_ht != zobj->properties && zend_hash_num_elements(gc_ht) > 0) {
+        meminfo_hash_write_entries(ctx, gc_ht, 0, first_child);
+
+        level->gc_ht = gc_ht;
+        zend_hash_internal_pointer_reset_ex(gc_ht, &level->gc_ht_pos);
+    }
 }
 
 
@@ -2228,6 +3025,11 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, zend_strin
     level->slots = NULL;
     level->slot_count = 0;
     level->slot_pos = 0;
+    level->gc_ht = NULL;
+    level->gc_ht_pos = 0;
+    level->gc_values = NULL;
+    level->gc_count = 0;
+    level->gc_pos = 0;
 #if PHP_VERSION_ID >= 70400
     level->properties_to_release = NULL;
 #endif
@@ -2279,7 +3081,7 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, zend_strin
     if (frame_label) {
         if (symbol_name) {
             MEMINFO_WRITE_LIT(w, "        \"symbol_name\" : \"");
-            meminfo_write_json_escaped(w, ZSTR_VAL(symbol_name));
+            meminfo_write_json_escaped_len(w, ZSTR_VAL(symbol_name), ZSTR_LEN(symbol_name));
             MEMINFO_WRITE_LIT(w, "\",\n");
         }
 
@@ -2304,6 +3106,10 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, zend_strin
         MEMINFO_WRITE_LIT(w, "\",\n");
 
         zend_object *zobj = Z_OBJ_P(zv);
+        int first_child = 1;
+
+        // One block for properties and get_gc() entries alike.
+        MEMINFO_WRITE_LIT(w, "        \"children\" : {");
 
         if (meminfo_object_has_plain_properties(zobj)) {
             // Read the declared slots directly: asking the handler would
@@ -2313,13 +3119,12 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, zend_strin
             uint32_t slot_count;
 
             if (meminfo_collect_declared_properties(zobj, &slots, &slot_count)) {
-                meminfo_slots_write_children(ctx, slots, slot_count);
+                meminfo_slots_write_entries(ctx, slots, slot_count, &first_child);
 
                 level->slots = slots;
                 level->slot_count = slot_count;
             } else {
                 ctx->aborted = 1;
-                MEMINFO_WRITE_LIT(w, "        \"children\" : {}");
             }
         } else {
 #if PHP_VERSION_ID >= 80000
@@ -2339,7 +3144,7 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, zend_strin
 #endif
 
             if (properties != NULL) {
-                meminfo_hash_write_children(ctx, properties, 1);
+                meminfo_hash_write_entries(ctx, properties, 1, &first_child);
 
                 // The properties table has to stay alive — and, on 7.4+, stay
                 // referenced — until the whole subtree below it has been visited.
@@ -2348,12 +3153,16 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, zend_strin
 #if PHP_VERSION_ID >= 70400
                 level->properties_to_release = properties;
 #endif
-            } else {
-                // Some internal classes (e.g. ext-protobuf messages) return NULL from get_properties:
-                // an empty children list closes the item after the trailing comma above
-                MEMINFO_WRITE_LIT(w, "        \"children\" : {}");
             }
+            // Some internal classes (e.g. ext-protobuf messages) return NULL
+            // from get_properties: the block then holds get_gc()'s entries at
+            // most, and is still written so that the item stays closed.
         }
+
+        if (!meminfo_aborted(ctx)) {
+            meminfo_object_write_gc_entries(ctx, zv, properties, level, &first_child);
+        }
+        meminfo_children_close(ctx, first_child);
 #if PHP_VERSION_ID >= 80100
         if (strcmp(ZSTR_VAL(class_name), "Fiber") == 0) {
             zend_object *object = Z_OBJ_P(zv);
@@ -2420,6 +3229,19 @@ static void meminfo_zval_dump(meminfo_context *ctx, char *frame_label, zend_stri
 
             if (child) {
                 zend_hash_move_forward_ex(top->ht, &top->pos);
+            }
+        }
+
+        // Then what get_gc() exposed, in the order the children block lists it.
+        if (child == NULL && top->gc_values && top->gc_pos < top->gc_count) {
+            child = &top->gc_values[top->gc_pos];
+            top->gc_pos++;
+        }
+        if (child == NULL && top->gc_ht) {
+            child = zend_hash_get_current_data_ex(top->gc_ht, &top->gc_ht_pos);
+
+            if (child) {
+                zend_hash_move_forward_ex(top->gc_ht, &top->gc_ht_pos);
             }
         }
 
@@ -3256,12 +4078,19 @@ PHP_FUNCTION(meminfo_dump_process)
                 goto done;
             }
         } else if (meminfo_now_usec() - began > (uint64_t) timeout_seconds * 1000000ULL) {
-            // The usual reason is a directory mismatch: the target writes to its
-            // own meminfo.dump_dir, and only builds that know about requests
-            // can be told otherwise.
+            // Two usual reasons. The target ran no PHP code meanwhile: the dump
+            // starts at the next opcode, and an idle event loop (Swoole,
+            // ReactPHP, AMPHP) or a long blocking call never gets there. Or a
+            // directory mismatch: the target writes to its own
+            // meminfo.dump_dir, and only builds that know about requests can be
+            // told otherwise.
             const char *hint = explicit_dir
-                ? "if it runs an older meminfo, it cannot be told where to write: look in its meminfo.dump_dir"
-                : "it writes to its own meminfo.dump_dir; pass \"dir\" to choose where";
+                ? "either it ran no PHP code in that time (an idle event loop or a long blocking call: "
+                  "retry while it is busy), or it runs an older meminfo that cannot be told where to "
+                  "write: look in its meminfo.dump_dir"
+                : "either it ran no PHP code in that time (an idle event loop or a long blocking call: "
+                  "retry while it is busy), or it wrote to its own meminfo.dump_dir: pass \"dir\" to "
+                  "choose where";
 
 #ifndef HAVE_SIGQUEUE
             if (untrusted > 0) {

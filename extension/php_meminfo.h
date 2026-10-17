@@ -59,6 +59,28 @@ typedef struct {
     char buf[MEMINFO_WRITER_BUFFER_SIZE];
 } meminfo_writer;
 
+#if PHP_VERSION_ID >= 80100
+/**
+ * Where one suspended fiber context stopped: its top frame at the moment it
+ * was switched away from.
+ */
+typedef struct {
+    void *context;                  /* zend_fiber_context *; NULL marks a free slot */
+    void *frame;                    /* zend_execute_data * */
+} meminfo_suspended_context;
+
+/**
+ * Open-addressing table of every suspended fiber context, keyed by context.
+ * malloc'd, like everything else the extension keeps, so that it never counts
+ * towards memory_limit.
+ */
+typedef struct {
+    meminfo_suspended_context *slots;
+    size_t capacity;                /* power of two, 0 before the first insert */
+    size_t count;
+} meminfo_suspended_map;
+#endif
+
 /**
  * Per-process state of the extension.
  *
@@ -88,6 +110,11 @@ ZEND_BEGIN_MODULE_GLOBALS(meminfo)
 
 #if MEMINFO_HAVE_SIGNAL_DUMP
     struct sigaction previous_action;
+#endif
+
+#if PHP_VERSION_ID >= 80100
+    /* fiber contexts that are suspended right now, filled by the fiber observers */
+    meminfo_suspended_map suspended;
 #endif
 ZEND_END_MODULE_GLOBALS(meminfo)
 

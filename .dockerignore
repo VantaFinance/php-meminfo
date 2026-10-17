@@ -63,10 +63,6 @@ extension/tests/*.log
 extension/tests/*.sh
 extension/tests/*.php.tmp
 
-# Analyzer: dependencies are resolved inside the image for each PHP version
-analyzer/vendor
-analyzer/composer.lock
-
 # Browser UI: a Node project of its own, not part of the image (and its
 # node_modules and generated test dumps run to hundreds of MB)
 ui

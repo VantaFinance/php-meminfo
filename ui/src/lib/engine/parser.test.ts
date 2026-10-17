@@ -237,6 +237,28 @@ describe('DumpParser on edge cases', () => {
     expect(parseText('{"header":{},"items":{}}').count).toBe(0)
   })
 
+  it('reads the newer root frames, get_gc() children and NUL in keys', () => {
+    // What the extension writes since it walks function statics, registered
+    // callbacks and constants, lists get_gc() entries as "[n]" and keeps NUL
+    // inside keys as \u0000.
+    const store = parseText(
+      '{"items":{' +
+        '"0x10":{"type":"object","size":"72","symbol_name":"set_error_handler","is_root":true,"frame":"<CALLBACK>",' +
+        '"class":"Closure","object_handle":"3","children":{"marker":"0x20","[0]":"0x30"}},' +
+        '"0x20":{"type":"object","size":"40","is_root":false,"class":"Marker","object_handle":"4","children":{}},' +
+        '"0x30":{"type":"array","size":"72","is_root":false,"children":{"a\\u0000b":"0x20"}},' +
+        '"0x40":{"type":"array","size":"72","symbol_name":"f()::$kept","is_root":true,"frame":"<STATIC_VARIABLE>","children":{}},' +
+        '"0x50":{"type":"array","size":"72","symbol_name":"LIST","is_root":true,"frame":"<CONSTANT>","children":{}}}}',
+    )
+
+    expect(store.count).toBe(5)
+    expect(store.item(0)).toMatchObject({ frame: '<CALLBACK>', symbol: 'set_error_handler', isRoot: true })
+    expect(store.item(0).children?.map((child) => child.name)).toEqual(['marker', '[0]'])
+    expect(store.item(2).children?.[0]?.name).toBe('a\u0000b')
+    expect([store.item(3).frame, store.item(4).frame]).toEqual(['<STATIC_VARIABLE>', '<CONSTANT>'])
+    expect(store.danglingEdges).toBe(0)
+  })
+
   it('counts dangling children instead of failing', () => {
     const store = parseText('{"items":{"0x10":{"type":"array","size":"72","is_root":true,"frame":"<GLOBAL>","children":{"gone":"0xdead"}}}}')
 

@@ -23,7 +23,7 @@ export interface DumpHeader {
   [field: string]: number | undefined
 }
 
-/** Plain view of one item, for details, tests and the analyzer-parity checks. */
+/** Plain view of one item, for details, tests and the parity checks. */
 export interface ItemView {
   index: number
   address: string

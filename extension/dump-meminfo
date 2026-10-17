@@ -57,8 +57,8 @@ function dump_meminfo_usage()
         '  dump-meminfo 12345',
         '  dump-meminfo 12345 --dir=/var/tmp --timeout=60',
         '',
-        'Analyze the result with:',
-        '  analyzer summary <dump-file>',
+        'Open the dump in the browser UI (nothing is uploaded):',
+        '  https://vantafinance.github.io/php-meminfo/',
     ));
 }
 

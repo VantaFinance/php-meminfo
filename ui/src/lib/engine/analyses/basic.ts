@@ -4,9 +4,10 @@ import type { Predecessors } from './graph'
 import { TopK } from './topk'
 
 /**
- * The PHP analyzer's analyses, on the columnar store: summary, top children,
- * query and reference paths. Same semantics as SummaryCreator, TopSearcher,
- * QueryExecutor and GraphBrowser, except where noted.
+ * The basic analyses, on the columnar store: summary, top children, query and
+ * reference paths. They keep the semantics of the former PHP CLI analyzer
+ * (SummaryCreator, TopSearcher, QueryExecutor, GraphBrowser), except where
+ * noted; basic.test.ts checks them against baselines it recorded.
  */
 
 const log = createLogger('analyses')

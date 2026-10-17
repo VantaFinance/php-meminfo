@@ -1,18 +1,19 @@
 # --- Makefile for PHP Meminfo ---
-# Two deliverables: the C extension in extension/ and the PHP analyzer in analyzer/.
+# The C extension in extension/ and the browser UI in ui/.
 # Usage: make [target]
+#
+# Works with the GNU Make 3.81 that macOS ships: no .ONESHELL and no
+# .SHELLFLAGS, so every recipe line is a complete shell command on its own.
+# Nothing is added to MAKEFLAGS either, because MAKEFLAGS is passed down to
+# the Makefile phpize generates in extension/.
 
 SHELL := bash
-.ONESHELL:
-.SHELLFLAGS := -eu -o pipefail -c
 .DELETE_ON_ERROR:
-MAKEFLAGS += --warn-undefined-variables
-MAKEFLAGS += --no-builtin-rules
+.SUFFIXES:
 
 # --- Project ---
 PROJECT  ?= $(shell basename $(CURDIR))
 EXT_DIR  ?= extension
-ANA_DIR  ?= analyzer
 
 # --- Toolchain ---
 # Override these to build against a specific PHP installation, e.g.:
@@ -20,7 +21,6 @@ ANA_DIR  ?= analyzer
 PHP        ?= php
 PHPIZE     ?= phpize
 PHP_CONFIG ?= php-config
-COMPOSER   ?= composer
 
 CONFIGURE_FLAGS ?= --enable-meminfo --with-php-config=$(PHP_CONFIG)
 
@@ -47,12 +47,10 @@ BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 # nothing is rebuilt unless its inputs actually changed.
 
 $(EXT_DIR)/configure: $(EXT_DIR)/config.m4
-	cd $(EXT_DIR)
-	$(PHPIZE)
+	cd $(EXT_DIR) && $(PHPIZE)
 
 $(EXT_DIR)/Makefile: $(EXT_DIR)/configure
-	cd $(EXT_DIR)
-	./configure $(CONFIGURE_FLAGS)
+	cd $(EXT_DIR) && ./configure $(CONFIGURE_FLAGS)
 
 $(EXT_SO): $(EXT_DIR)/Makefile $(EXT_SOURCES)
 	$(MAKE) -C $(EXT_DIR)
@@ -61,8 +59,11 @@ $(EXT_SO): $(EXT_DIR)/Makefile $(EXT_SOURCES)
 build: $(EXT_SO) ## Build the C extension (phpize + configure + make as needed)
 	@echo "Built $(EXT_SO) ($(VERSION), $(COMMIT), $(BUILD_TIME))"
 
+# Sequential sub-makes, so that `make -j rebuild` cannot build while it cleans.
 .PHONY: rebuild
-rebuild: clean-ext build ## Force a clean rebuild of the extension
+rebuild: ## Force a clean rebuild of the extension
+	$(MAKE) clean-ext
+	$(MAKE) build
 
 .PHONY: install-ext
 install-ext: build ## Install the extension into the PHP extension directory (may need sudo)
@@ -80,20 +81,10 @@ install-cli: ## Install the dump-meminfo command into $(PREFIX)/bin (may need su
 	install -m 0755 $(EXT_DIR)/dump-meminfo $(DESTDIR)$(PREFIX)/bin/dump-meminfo
 	@echo "Installed $(DESTDIR)$(PREFIX)/bin/dump-meminfo"
 
-.PHONY: install
-install: ## Install analyzer dependencies via Composer
-	cd $(ANA_DIR)
-	$(COMPOSER) install
-
-.PHONY: update
-update: ## Update analyzer dependencies
-	cd $(ANA_DIR)
-	$(COMPOSER) update
-
 ##@ Testing
 
 .PHONY: test
-test: test-ext test-analyzer ## Run both test suites
+test: test-ext ## Run the extension's test suite (alias of test-ext)
 
 .PHONY: test-ext
 test-ext: build ## Run the .phpt test suite for the extension
@@ -101,27 +92,23 @@ test-ext: build ## Run the .phpt test suite for the extension
 
 .PHONY: test-one
 test-one: build ## Run a single .phpt test (usage: make test-one TEST=tests/dump-array.phpt)
-	@if [ -z "$(TEST)" ]; then
-		echo "error: TEST is required, e.g. make test-one TEST=tests/dump-array.phpt" >&2
-		exit 1
+	@if [ -z "$(TEST)" ]; then \
+		echo "error: TEST is required, e.g. make test-one TEST=tests/dump-array.phpt" >&2; \
+		exit 1; \
 	fi
 	$(TEST_ENV) $(MAKE) -C $(EXT_DIR) test TESTS="$(TEST)"
 
-.PHONY: test-analyzer
-test-analyzer: install ## Run the phpspec suite for the analyzer
-	cd $(ANA_DIR)
-	vendor/bin/phpspec run
-
 ##@ Code Quality
 
+# The standalone PHP scripts: examples, fixture generators and repro scripts.
+LINT_DIRS := doc $(EXT_DIR)/tests/fixtures ui/tests/fixtures tools/repro
+
 .PHONY: lint
-lint: ## Syntax-check every analyzer PHP file with php -l
-	find $(ANA_DIR)/src $(ANA_DIR)/spec $(ANA_DIR)/bin -type f -name '*.php' -print0 \
-		| xargs -0 -n1 $(PHP) -l
-	$(PHP) -l $(ANA_DIR)/bin/analyzer
+lint: ## Syntax-check the repository's PHP scripts with php -l
+	find $(LINT_DIRS) -type f -name '*.php' -print0 | xargs -0 -n1 $(PHP) -l
 
 .PHONY: check
-check: lint test ## Run linting and both test suites
+check: lint test ## Run linting and the extension's test suite
 
 ##@ Usage
 
@@ -132,24 +119,12 @@ EXAMPLE_DUMP := /tmp/php_mem_dump.json
 dump-example: build ## Run doc/example.php to produce a sample dump at /tmp/php_mem_dump.json
 	$(PHP) -d extension=$(CURDIR)/$(EXT_SO) doc/example.php
 	@echo "Dump written to $(EXAMPLE_DUMP)"
-	@echo "Inspect it with: make summary DUMP=$(EXAMPLE_DUMP)"
-
-.PHONY: summary
-summary: install ## Show a summary of a dump file (usage: make summary DUMP=path/to/dump.json)
-	@if [ -z "$(DUMP)" ]; then
-		echo "error: DUMP is required, e.g. make summary DUMP=meminfo.dump" >&2
-		exit 1
-	fi
-	$(ANA_DIR)/bin/analyzer summary "$(DUMP)"
-
-.PHONY: analyzer
-analyzer: install ## Run any analyzer command (usage: make analyzer ARGS="query dump.json --type=object")
-	$(ANA_DIR)/bin/analyzer $(ARGS)
+	@echo "Open it in the browser UI: make ui-dev, or https://vantafinance.github.io/php-meminfo/"
 
 ##@ CI
 
 .PHONY: ci
-ci: build test ## Run the full pipeline as CI does (build extension, both test suites)
+ci: build test ## Run what CI runs for the extension (build + .phpt suite)
 
 ##@ Docker
 
@@ -175,8 +150,8 @@ docker-build: ## Build image meminfo:php-X.Y with the extension (usage: make doc
 	@echo "Built image $(DOCKER_TAG)"
 
 .PHONY: docker-test
-docker-test: docker-build ## Run both test suites inside the image (usage: make docker-test PHP_VERSION=7.4)
-	$(DOCKER) run --rm $(DOCKER_PLATFORM_FLAG) $(DOCKER_TAG) make test-ext test-analyzer
+docker-test: docker-build ## Run the .phpt suite inside the image (usage: make docker-test PHP_VERSION=7.4)
+	$(DOCKER) run --rm $(DOCKER_PLATFORM_FLAG) $(DOCKER_TAG) make test-ext
 
 .PHONY: docker-matrix
 docker-matrix: ## Run docker-test for every version in PHP_VERSIONS
@@ -219,6 +194,31 @@ repro: repro-build ## Dump protobuf/grpc objects and check the dump is valid JSO
 repro-test: repro-build ## Run the .phpt suite with ext-protobuf loaded
 	$(DOCKER) run --rm $(DOCKER_PLATFORM_FLAG) $(REPRO_TAG) sh -c \
 		'make test-one TEST="-d extension=$$(php-config --extension-dir)/protobuf.so tests/"'
+
+# $(DOCKER_TAG) plus ext-swoole, see tools/repro/swoole/. PHP 8.1+ only; Swoole 6
+# needs 8.2, so 8.1 gets the 5.1 line.
+SWOOLE_VERSION ?= $(if $(filter 8.1,$(PHP_VERSION)),5.1.8,6.2.3)
+SWOOLE_TAG     := $(DOCKER_IMAGE)-swoole:php-$(PHP_VERSION)
+
+.PHONY: repro-swoole-build
+repro-swoole-build: docker-build ## Build the Swoole repro image (usage: make repro-swoole-build PHP_VERSION=8.3)
+	@case "$(PHP_VERSION)" in 7.*|8.0) \
+		echo "error: the Swoole repro needs PHP 8.1+, got PHP_VERSION=$(PHP_VERSION)" >&2; exit 1;; \
+	esac
+	$(DOCKER) build $(DOCKER_PLATFORM_FLAG) \
+		--build-arg PHP_VERSION=$(PHP_VERSION) \
+		--build-arg SWOOLE_VERSION=$(SWOOLE_VERSION) \
+		-f tools/repro/swoole/Dockerfile -t $(SWOOLE_TAG) .
+	@echo "Built image $(SWOOLE_TAG) (Swoole $(SWOOLE_VERSION))"
+
+.PHONY: repro-swoole
+repro-swoole: repro-swoole-build ## Dump coroutine processes under Swoole and check what the dumps hold
+	$(DOCKER) run --rm $(DOCKER_PLATFORM_FLAG) $(SWOOLE_TAG)
+
+.PHONY: repro-swoole-test
+repro-swoole-test: repro-swoole-build ## Run the .phpt suite with ext-swoole loaded
+	$(DOCKER) run --rm $(DOCKER_PLATFORM_FLAG) $(SWOOLE_TAG) sh -c \
+		'make test-one TEST="-d extension=$$(php-config --extension-dir)/swoole.so tests/"'
 
 ##@ IDE
 
@@ -274,9 +274,8 @@ ui-e2e: ## Run the browser UI's end-to-end and memory tests (Playwright, Chromiu
 	$(NPM) --prefix $(UI_DIR) run test:e2e
 
 .PHONY: ui-fixtures
-ui-fixtures: ## Regenerate the UI's dump fixtures and analyzer baselines (needs PHP 8.1+ with meminfo, and make install)
+ui-fixtures: ## Regenerate the UI's ui-only dump fixtures (needs PHP 8.1+ with meminfo)
 	$(PHP) $(UI_DIR)/tests/fixtures/make-fixtures.php
-	$(PHP) $(UI_DIR)/tests/fixtures/analyzer-baseline.php
 
 .PHONY: clean-ui
 clean-ui: ## Remove the browser UI's dependencies, build and generated test dumps
@@ -286,20 +285,25 @@ clean-ui: ## Remove the browser UI's dependencies, build and generated test dump
 
 .PHONY: clean-ext
 clean-ext: ## Remove extension build artifacts and the generated build system
-	@if [ -f $(EXT_DIR)/Makefile ]; then
-		$(MAKE) -C $(EXT_DIR) clean
+	@if [ -f $(EXT_DIR)/Makefile ]; then \
+		echo "Cleaning the extension build in $(EXT_DIR)"; \
+		$(MAKE) -C $(EXT_DIR) clean; \
 	fi
-	cd $(EXT_DIR)
-	$(PHPIZE) --clean
-	rm -f tests/*.out tests/*.diff tests/*.exp tests/*.log tests/*.sh
-	rm -f tests/*.php.tmp
-
-.PHONY: clean-analyzer
-clean-analyzer: ## Remove analyzer dependencies
-	rm -rf $(ANA_DIR)/vendor
+	@if command -v $(PHPIZE) >/dev/null 2>&1; then \
+		echo "Removing the files phpize generated in $(EXT_DIR)"; \
+		cd $(EXT_DIR) && $(PHPIZE) --clean; \
+	else \
+		echo "warning: $(PHPIZE) not found, the files it generated are left in $(EXT_DIR)" >&2; \
+	fi
+	@# What phpize --clean leaves behind: autoconf backups (configure~,
+	@# config.h.in~), the include/ directory and run-tests.php output.
+	rm -rf $(EXT_DIR)/include $(EXT_DIR)/*~ $(EXT_DIR)/run-tests.php $(EXT_DIR)/tmp-php.ini
+	rm -f $(EXT_DIR)/tests/*.out $(EXT_DIR)/tests/*.diff $(EXT_DIR)/tests/*.exp \
+		$(EXT_DIR)/tests/*.log $(EXT_DIR)/tests/*.sh $(EXT_DIR)/tests/*.mem \
+		$(EXT_DIR)/tests/*.php.tmp $(EXT_DIR)/tests/*.php
 
 .PHONY: clean
-clean: clean-ext clean-analyzer clean-ui ## Remove all build artifacts and dependencies
+clean: clean-ext clean-ui ## Remove all build artifacts and dependencies
 
 ##@ Help
 
@@ -309,8 +313,4 @@ help: ## Show this help
 		/^[a-zA-Z0-9_-]+:.*?## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2} \
 		/^##@/ {printf "\n\033[1m%s\033[0m\n", substr($$0, 5)}' $(MAKEFILE_LIST)
 
-# ARGS is optional (used by the analyzer target) — declare it so that
-# --warn-undefined-variables stays quiet when it is not passed.
-ARGS ?=
 TEST ?=
-DUMP ?=
