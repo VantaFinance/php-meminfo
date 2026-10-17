@@ -24,6 +24,8 @@ extension/compile
 extension/depcomp
 extension/.deps
 extension/**/*.lo
+# Dependency files from PHP 8.3+ phpize builds; they carry host paths
+extension/**/*.dep
 extension/**/*.la
 extension/**/*.o
 extension/.libs
@@ -64,3 +66,7 @@ extension/tests/*.php.tmp
 # Analyzer: dependencies are resolved inside the image for each PHP version
 analyzer/vendor
 analyzer/composer.lock
+
+# Browser UI: a Node project of its own, not part of the image (and its
+# node_modules and generated test dumps run to hundreds of MB)
+ui

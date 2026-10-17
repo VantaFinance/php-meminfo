@@ -1,0 +1,298 @@
+{
+    "fixture": "basic.json",
+    "items": 128,
+    "summary": [
+        {
+            "type": "string",
+            "count": 83,
+            "self_size": 3984
+        },
+        {
+            "type": "array",
+            "count": 17,
+            "self_size": 1224
+        },
+        {
+            "type": "int",
+            "count": 15,
+            "self_size": 240
+        },
+        {
+            "type": "null",
+            "count": 5,
+            "self_size": 80
+        },
+        {
+            "type": "float",
+            "count": 2,
+            "self_size": 32
+        },
+        {
+            "type": "Child",
+            "count": 1,
+            "self_size": 72
+        },
+        {
+            "type": "stdClass",
+            "count": 1,
+            "self_size": 72
+        },
+        {
+            "type": "Suit",
+            "count": 1,
+            "self_size": 72
+        },
+        {
+            "type": "Fiber",
+            "count": 1,
+            "self_size": 72
+        },
+        {
+            "type": "Base",
+            "count": 1,
+            "self_size": 72
+        },
+        {
+            "type": "bool",
+            "count": 1,
+            "self_size": 16
+        }
+    ],
+    "topChildren": [
+        {
+            "id": "0x10885c2c0",
+            "children": 60
+        },
+        {
+            "id": "0x108819070",
+            "children": 7
+        },
+        {
+            "id": "0x108819560",
+            "children": 4
+        },
+        {
+            "id": "0x1088027e0",
+            "children": 4
+        },
+        {
+            "id": "0x108819540",
+            "children": 3
+        },
+        {
+            "id": "0x1088190f0",
+            "children": 3
+        },
+        {
+            "id": "0x10885d340",
+            "children": 3
+        },
+        {
+            "id": "0x108804060",
+            "children": 3
+        },
+        {
+            "id": "0x108819550",
+            "children": 2
+        },
+        {
+            "id": "0x108802828",
+            "children": 2
+        },
+        {
+            "id": "0x1088051e0",
+            "children": 2
+        },
+        {
+            "id": "0x1088195c0",
+            "children": 2
+        },
+        {
+            "id": "0x1088195d0",
+            "children": 2
+        },
+        {
+            "id": "0x1088040a8",
+            "children": 2
+        },
+        {
+            "id": "0x10886ece0",
+            "children": 1
+        },
+        {
+            "id": "0x1088078e8",
+            "children": 1
+        },
+        {
+            "id": "0x10885b880",
+            "children": 1
+        },
+        {
+            "id": "0x10889c180",
+            "children": 0
+        },
+        {
+            "id": "0x10885c200",
+            "children": 0
+        },
+        {
+            "id": "0x10885c220",
+            "children": 0
+        }
+    ],
+    "queries": [
+        {
+            "name": "roots",
+            "filters": {
+                "is_root": {
+                    "operator": "=",
+                    "value": 1
+                }
+            },
+            "limit": 10,
+            "ids": [
+                "0x1088194f0",
+                "0x108819500",
+                "0x108819510",
+                "0x108819520",
+                "0x108819530",
+                "0x108819540",
+                "0x108819550",
+                "0x108819560",
+                "0x1088027e0",
+                "0x1088051e0"
+            ]
+        },
+        {
+            "name": "strings",
+            "filters": {
+                "type": {
+                    "operator": "=",
+                    "value": "string"
+                }
+            },
+            "limit": 10,
+            "ids": [
+                "0x1088194f0",
+                "0x10886eb80",
+                "0x10886ee00",
+                "0x10886ee20",
+                "0x10886ee40",
+                "0x10886ee60",
+                "0x108802808",
+                "0x108805208",
+                "0x108805218",
+                "0x108819590"
+            ]
+        },
+        {
+            "name": "request objects",
+            "filters": {
+                "class": {
+                    "operator": "=",
+                    "value": "Request"
+                },
+                "is_root": {
+                    "operator": "=",
+                    "value": 0
+                }
+            },
+            "limit": 10,
+            "ids": []
+        },
+        {
+            "name": "class regex",
+            "filters": {
+                "class": {
+                    "operator": "~",
+                    "value": "^(Child|Base|Registry)$"
+                }
+            },
+            "limit": 10,
+            "ids": [
+                "0x1088027e0",
+                "0x108804060"
+            ]
+        }
+    ],
+    "referencePaths": [
+        {
+            "label": "Child",
+            "target": "0x1088027e0",
+            "paths": [
+                {
+                    "root": "0x1088027e0",
+                    "length": 1,
+                    "names": [
+                        "<self>"
+                    ]
+                }
+            ]
+        },
+        {
+            "label": "stdClass",
+            "target": "0x1088078e8",
+            "paths": [
+                {
+                    "root": "0x1088027e0",
+                    "length": 1,
+                    "names": [
+                        "extra"
+                    ]
+                }
+            ]
+        },
+        {
+            "label": "Suit",
+            "target": "0x1088051e0",
+            "paths": [
+                {
+                    "root": "0x1088051e0",
+                    "length": 1,
+                    "names": [
+                        "<self>"
+                    ]
+                }
+            ]
+        },
+        {
+            "label": "Fiber",
+            "target": "0x10889c180",
+            "paths": [
+                {
+                    "root": "0x10889c180",
+                    "length": 1,
+                    "names": [
+                        "<self>"
+                    ]
+                }
+            ]
+        },
+        {
+            "label": "Base",
+            "target": "0x108804060",
+            "paths": [
+                {
+                    "root": "0x10885b880",
+                    "length": 1,
+                    "names": [
+                        "first"
+                    ]
+                }
+            ]
+        },
+        {
+            "label": "<first root>",
+            "target": "0x1088194f0",
+            "paths": [
+                {
+                    "root": "0x1088194f0",
+                    "length": 1,
+                    "names": [
+                        "<self>"
+                    ]
+                }
+            ]
+        }
+    ]
+}

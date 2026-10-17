@@ -9,6 +9,7 @@ Check that all children items are properly linked through their identifiers
 <?php
     $dump = fopen('php://memory', 'rw');
 
+    #[AllowDynamicProperties]
     class MyClass {
         public $myDeclaredVar;
     }

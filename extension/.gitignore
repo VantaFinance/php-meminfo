@@ -12,6 +12,7 @@ depcomp
 # phpize
 .deps
 *.lo
+*.dep
 *.la
 .libs
 Makefile

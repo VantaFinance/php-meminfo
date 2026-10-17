@@ -4,44 +4,118 @@ on: push
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        php-versions: ['7.0', '7.1', '7.2', '7.3', '7.4', '8.0', '8.1']
+        php-versions: ['7.0', '7.1', '7.2', '7.3', '7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+        sigqueue: ['yes']
+        os: ['ubuntu-22.04']
+        include:
+          # Built as if sigqueue() did not exist, which is the macOS situation:
+          # the target names its dump after its pid and the trigger has to find it.
+          - php-versions: '8.1'
+            sigqueue: 'no'
+            os: 'ubuntu-22.04'
+          # The real thing: no sigqueue(), no /proc; process facts come from sysctl.
+          - php-versions: '8.1'
+            sigqueue: 'yes'
+            os: 'macos-latest'
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+
+      # ext-protobuf, so bug-protobuf_null_properties.phpt runs instead of skipping.
+      # Each PECL line supports only some PHP versions: pick the newest that builds.
+      # On macOS a PECL build fails; the unversioned name gets setup-php's Homebrew bottle.
+      - name: Pick the ext-protobuf version
+        id: protobuf
+        run: |
+          case "${{ matrix.php-versions }}" in
+            7.*) version=3.24.4 ;;
+            8.0) version=3.25.3 ;;
+            8.1) version=4.33.6 ;;
+            *)   version=5.36.2 ;;
+          esac
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            echo "extension=protobuf" >> "$GITHUB_OUTPUT"
+          else
+            echo "extension=protobuf-$version" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php-versions }}
+          extensions: posix, json, ${{ steps.protobuf.outputs.extension }}
           coverage: none
+
+      # run-tests.php of PHP 8 starts PHP with -n, so protobuf has to be loaded by
+      # its full path. That path is taken from the ini setup-php wrote: on macOS
+      # Homebrew keeps it outside php-config's extension dir.
+      - name: Locate ext-protobuf
+        run: |
+          protobuf=$(php -r '
+            $files = array_filter(array_map("trim", array_merge([(string) php_ini_loaded_file()], explode(",", (string) php_ini_scanned_files()))));
+            foreach ($files as $file) {
+                foreach (file($file) as $line) {
+                    if (preg_match("/^\\s*extension\\s*=\\s*\"?([^\"\\s;]*protobuf[^\"\\s;]*)/", $line, $m)) {
+                        $path = $m[1];
+                        if ($path[0] !== "/") {
+                            $path = ini_get("extension_dir")."/".(substr($path, -3) === ".so" ? $path : $path.".so");
+                        }
+                        echo $path;
+                        exit(0);
+                    }
+                }
+            }
+            exit(1);
+          ')
+          echo "PROTOBUF_SO=$protobuf" >> "$GITHUB_ENV"
 
       - name: Build the extension
         run: |
           cd extension/
           phpize
+          if [ "${{ matrix.sigqueue }}" = "no" ]; then
+            export ac_cv_func_sigqueue=no
+          fi
           ./configure
           make
 
+      # On macOS sigqueue() is absent by itself; the check proves the kill path is the one tested.
+      - name: Check that sigqueue() is disabled
+        if: matrix.sigqueue == 'no' || runner.os == 'macOS'
+        run: |
+          ! grep -q '^#define HAVE_SIGQUEUE' extension/config.h
+
+      # run-tests.php from PHP 7 does not pick up the freshly built module on its
+      # own, so the extension is passed explicitly; it does read php.ini, which
+      # already loads protobuf. make test works on PHP 8.
       - name: Test the extension (PHP 7)
-        if: matrix.php-versions != '8.0' and matrix.php-versions == '8.1'
+        if: startsWith(matrix.php-versions, '7.')
         run: |
           cd extension/
-          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 TEST_PHP_EXECUTABLE=$(which php) $(which php) run-tests.php -d extension=$PWD/modules/meminfo.so
+          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 TEST_PHP_EXECUTABLE=$(which php) $(which php) run-tests.php -d extension=$PWD/modules/meminfo.so | tee run-tests.log
 
       - name: Test the extension (PHP 8)
-        if: matrix.php-versions == '8.0' or matrix.php-versions == '8.1'
+        if: startsWith(matrix.php-versions, '8.')
         run: |
           cd extension/
-          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test
+          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test TESTS="-d extension=$PROTOBUF_SO tests/" | tee run-tests.log
 
-      - uses: actions/upload-artifact@v2
+      # A protobuf.so that fails to load makes the test skip, not fail.
+      - name: Check that the protobuf test ran
+        run: |
+          grep -E '(PASS|FAIL).*bug-protobuf_null_properties' extension/run-tests.log
+
+      - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: ext-tests-output
-          path: 'extension/tests/*.out'
+          name: ext-tests-output-${{ matrix.os }}-php-${{ matrix.php-versions }}-sigqueue-${{ matrix.sigqueue }}
+          path: |
+            extension/tests/*.out
+            extension/tests/*.diff
 
       - name: Test the analyzers
         run: |

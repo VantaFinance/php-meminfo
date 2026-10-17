@@ -1,0 +1,239 @@
+<script lang="ts">
+  import { formatBytes, formatCount, formatPercent } from '../../format'
+  import { createLogger } from '../../log'
+  import { app } from '../../state/app.svelte'
+  import type { ClassRetentionRow, SuspectRow, SuspectsResult } from '../../worker/protocol'
+  import ItemLabel from '../ItemLabel.svelte'
+  import VirtualTable, { type Column } from '../VirtualTable.svelte'
+
+  const log = createLogger('suspects-view')
+
+  let result = $state.raw<SuspectsResult | null>(null)
+  let failed = $state<string | null>(null)
+
+  $effect(() => {
+    void app.generation
+    const client = app.client
+    if (client === null) return
+    let cancelled = false
+    client
+      .request({ kind: 'suspects', limit: 500 })
+      .then((value) => {
+        if (!cancelled) result = value
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        failed = String(error)
+        log.warn('suspects failed', { error: failed })
+      })
+    return () => {
+      cancelled = true
+    }
+  })
+
+  const total = $derived(result?.totalSize ?? 0)
+
+  const classColumns: Column<ClassRetentionRow>[] = [
+    { key: 'key', label: 'Class or type', width: 'minmax(160px, 1fr)', value: (row) => row.key },
+    { key: 'retained', label: 'Retained', width: '96px', align: 'right', value: (row) => formatBytes(row.retained), compare: (a, b) => a.retained - b.retained },
+    { key: 'share', label: 'Share', width: '120px', value: (row) => formatPercent(row.retained, total) },
+    { key: 'instances', label: 'Instances', width: '96px', align: 'right', value: (row) => formatCount(row.instances), compare: (a, b) => a.instances - b.instances },
+    {
+      key: 'topMost',
+      label: 'Top-most',
+      width: '88px',
+      align: 'right',
+      value: (row) => formatCount(row.topMost),
+      title: () => 'Instances not kept alive by another instance of the same class',
+      compare: (a, b) => a.topMost - b.topMost,
+    },
+  ]
+
+  const suspectColumns: Column<SuspectRow>[] = [
+    { key: 'what', label: 'Retainer', width: 'minmax(200px, 1fr)', value: (row) => `${row.className ?? row.type} ${row.symbol ?? ''}` },
+    { key: 'frame', label: 'Frame', width: 'minmax(160px, 0.7fr)', value: (row) => row.frame ?? (row.shared ? 'shared by several roots' : '') },
+    { key: 'retained', label: 'Retained', width: '96px', align: 'right', value: (row) => formatBytes(row.retained), compare: (a, b) => a.retained - b.retained },
+    { key: 'share', label: 'Share', width: '120px', value: (row) => formatPercent(row.retained, total) },
+    { key: 'dominated', label: 'Items kept', width: '96px', align: 'right', value: (row) => formatCount(row.dominated), compare: (a, b) => a.dominated - b.dominated },
+  ]
+</script>
+
+{#snippet share(part: number)}
+  <span class="share">
+    <span class="share-bar" style:width="{total > 0 ? Math.max(2, (part / total) * 100) : 0}%"></span>
+    <span class="share-text">{formatPercent(part, total)}</span>
+  </span>
+{/snippet}
+
+<section class="view">
+  <header class="view-header">
+    <div>
+      <h2>Leak suspects</h2>
+      <p class="sub">What keeps the most memory alive, by what would be freed if it went away.</p>
+    </div>
+  </header>
+
+  {#if failed}
+    <div class="notice danger" role="alert">{failed}</div>
+  {:else if result === null}
+    <div class="loading">
+      <div class="skeleton" style:height="18px" style:width="40%"></div>
+      <div class="skeleton" style:height="160px"></div>
+    </div>
+  {:else}
+    <p class="notice">
+      The dump accounts for {formatBytes(result.totalSize)}{#if app.overview?.header.memory_usage}{' '}of the
+        {formatBytes(app.overview.header.memory_usage)} PHP reported in use{/if}. Sizes are the dump's estimates, and
+      a value also held by a global or a static after a local may be missing its other holders, so treat retained sizes as
+      relative.
+      {#if result.sharedItems > 0}
+        {formatCount(result.sharedItems)} items are shared by several roots and retained by none of them alone.
+      {/if}
+    </p>
+
+    <div class="block">
+      <h3>Biggest retainers</h3>
+      <VirtualTable
+        label="Biggest retainers"
+        columns={suspectColumns}
+        rows={result.suspects}
+        rowKey={(row) => row.index}
+        selectedKey={app.selected}
+        onActivate={(row) => app.select(row.index)}
+        height="320px"
+      >
+        {#snippet cell(row, column)}
+          {#if column.key === 'what'}
+            <ItemLabel {row} />
+            {#if row.shared}<span class="badge shared">shared</span>{/if}
+          {:else if column.key === 'share'}
+            {@render share(row.retained)}
+          {:else}
+            {column.value(row)}
+          {/if}
+        {/snippet}
+      </VirtualTable>
+    </div>
+
+    <div class="block">
+      <h3>Classes retaining the most</h3>
+      <VirtualTable
+        label="Classes retaining the most"
+        columns={classColumns}
+        rows={result.classes}
+        onActivate={(row) => app.searchFor(row.key, row.isClass)}
+        height="320px"
+      >
+        {#snippet cell(row, column)}
+          {#if column.key === 'share'}
+            {@render share(row.retained)}
+          {:else}
+            {column.value(row)}
+          {/if}
+        {/snippet}
+      </VirtualTable>
+    </div>
+
+    {#if result.frames.length > 0}
+      <div class="block">
+        <h3>Roots by frame</h3>
+        <ul class="frames">
+          {#each result.frames.slice(0, 12) as frame (frame.frame)}
+            <li>
+              <span class="mono">{frame.frame}</span>
+              <span class="muted">{formatCount(frame.roots)} roots</span>
+              <span class="num">{formatBytes(frame.retained)}</span>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
+  {/if}
+</section>
+
+<style>
+  .view {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-5);
+  }
+
+  .view-header h2 {
+    font-size: var(--text-xl);
+    font-weight: 600;
+  }
+
+  .sub {
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+  }
+
+  .block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  h3 {
+    font-size: var(--text-md);
+    font-weight: 600;
+  }
+
+  .loading {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .share {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+  }
+
+  .share-bar {
+    height: 6px;
+    max-width: 60%;
+    border-radius: 3px;
+    background: var(--bar-strong);
+  }
+
+  .share-text {
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .frames {
+    display: grid;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: var(--text-sm);
+  }
+
+  .frames li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 100px 96px;
+    gap: var(--space-3);
+    padding: 4px var(--space-3);
+    border-radius: var(--radius-sm);
+  }
+
+  .frames li:nth-child(odd) {
+    background: var(--surface-sunken);
+  }
+
+  .muted {
+    color: var(--text-muted);
+  }
+
+  .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+</style>

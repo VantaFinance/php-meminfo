@@ -38,7 +38,13 @@ Check that objects whose get_properties handler returns NULL (ext-protobuf) prod
     $classes = [];
     foreach ($meminfoData['items'] as $item) {
         if ($item['type'] === 'object' && strpos($item['class'], 'Google\\Protobuf\\') === 0) {
-            $classes[] = $item['class'].': '.(isset($item['children']) && $item['children'] === [] ? 'empty children' : 'unexpected children');
+            // protobuf 4.30 moved RepeatedField (and may move MapField) out of Internal\.
+            $class = str_replace(
+                ['Google\\Protobuf\\Internal\\RepeatedField', 'Google\\Protobuf\\Internal\\MapField'],
+                ['Google\\Protobuf\\RepeatedField', 'Google\\Protobuf\\MapField'],
+                $item['class']
+            );
+            $classes[] = $class.': '.(isset($item['children']) && $item['children'] === [] ? 'empty children' : 'unexpected children');
         }
     }
     sort($classes);
@@ -47,9 +53,9 @@ Check that objects whose get_properties handler returns NULL (ext-protobuf) prod
 ?>
 --EXPECT--
 meminfo_dump JSON decode ok
-Google\Protobuf\Internal\MapField: empty children
-Google\Protobuf\Internal\RepeatedField: empty children
 Google\Protobuf\ListValue: empty children
+Google\Protobuf\MapField: empty children
+Google\Protobuf\RepeatedField: empty children
 Google\Protobuf\Struct: empty children
 Google\Protobuf\Timestamp: empty children
 Google\Protobuf\Value: empty children

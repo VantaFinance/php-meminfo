@@ -1,0 +1,779 @@
+{
+  "header" : {
+    "memory_usage" : 434776,
+    "memory_usage_real" : 2097152,
+    "peak_memory_usage" : 475624,
+    "peak_memory_usage_real" : 2097152
+  },
+  "items": {
+    "0x104a194f0" : {
+        "type" : "string",
+        "size" : "106",
+        "symbol_name" : "out",
+        "is_root" : true,
+        "frame" : "scenario_invalid_utf8()"
+
+
+    },
+    "0x104a19500" : {
+        "type" : "array",
+        "size" : "72",
+        "symbol_name" : "keys",
+        "is_root" : true,
+        "frame" : "scenario_invalid_utf8()"
+,
+        "children" : {
+            "plain":"0x104a6f400",
+            "badÿþ":"0x104a6f420",
+            "ctl\u0001\u001f":"0x104a6f440",
+            "quote\"back\\slash":"0x104a6f460",
+            "cafÃ©":"0x104a6f480"
+        }
+
+    },
+    "0x104a6f400" : {
+        "type" : "int",
+        "size" : "16",
+        "is_root" : false
+
+
+    },
+    "0x104a6f420" : {
+        "type" : "int",
+        "size" : "16",
+        "is_root" : false
+
+
+    },
+    "0x104a6f440" : {
+        "type" : "int",
+        "size" : "16",
+        "is_root" : false
+
+
+    },
+    "0x104a6f460" : {
+        "type" : "int",
+        "size" : "16",
+        "is_root" : false
+
+
+    },
+    "0x104a6f480" : {
+        "type" : "int",
+        "size" : "16",
+        "is_root" : false
+
+
+    },
+    "0x104a5c200" : {
+        "type" : "array",
+        "size" : "72",
+        "symbol_name" : "_GET",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+,
+        "children" : {
+
+        }
+
+    },
+    "0x104a5c220" : {
+        "type" : "array",
+        "size" : "72",
+        "symbol_name" : "_POST",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+,
+        "children" : {
+
+        }
+
+    },
+    "0x104a5c240" : {
+        "type" : "array",
+        "size" : "72",
+        "symbol_name" : "_COOKIE",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+,
+        "children" : {
+
+        }
+
+    },
+    "0x104a5c260" : {
+        "type" : "array",
+        "size" : "72",
+        "symbol_name" : "_FILES",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+,
+        "children" : {
+
+        }
+
+    },
+    "0x104a190f0" : {
+        "type" : "array",
+        "size" : "72",
+        "symbol_name" : "argv",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+,
+        "children" : {
+            "0":"0x104a61008",
+            "1":"0x104a61018",
+            "2":"0x104a61028"
+        }
+
+    },
+    "0x104a61008" : {
+        "type" : "string",
+        "size" : "98",
+        "is_root" : false
+
+
+    },
+    "0x104a61018" : {
+        "type" : "string",
+        "size" : "37",
+        "is_root" : false
+
+
+    },
+    "0x104a61028" : {
+        "type" : "string",
+        "size" : "106",
+        "is_root" : false
+
+
+    },
+    "0x104a19080" : {
+        "type" : "int",
+        "size" : "16",
+        "symbol_name" : "argc",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+
+
+    },
+    "0x104a5c2c0" : {
+        "type" : "array",
+        "size" : "72",
+        "symbol_name" : "_SERVER",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+,
+        "children" : {
+            "CLAUDE_CODE_MESSAGING_TOKEN":"0x104a5cc00",
+            "NoDefaultCurrentDirectoryInExePath":"0x104a5cc20",
+            "CLAUDE_EFFORT":"0x104a5cc40",
+            "CLAUDE_CODE_ENTRYPOINT":"0x104a5cc60",
+            "_P9K_TTY":"0x104a5cc80",
+            "NVM_CD_FLAGS":"0x104a5cca0",
+            "TERM":"0x104a5ccc0",
+            "SHELL":"0x104a5cce0",
+            "CLAUDE_PID":"0x104a5cd00",
+            "CLAUDE_CODE_CHILD_SESSION":"0x104a5cd20",
+            "TMPDIR":"0x104a5cd40",
+            "TERM_SESSION_ID":"0x104a5cd60",
+            "ZSH":"0x104a5cd80",
+            "ENABLE_IDE_INTEGRATION":"0x104a5cda0",
+            "GIT_EDITOR":"0x104a5cdc0",
+            "AI_AGENT":"0x104a5cde0",
+            "PROCESS_LAUNCHED_BY_Q":"0x104a5ce00",
+            "NVM_DIR":"0x104a5ce20",
+            "USER":"0x104a5ce40",
+            "LS_COLORS":"0x104a5ce60",
+            "COMMAND_MODE":"0x104a5ce80",
+            "SSH_AUTH_SOCK":"0x104a5cea0",
+            "__CF_USER_TEXT_ENCODING":"0x104a5cec0",
+            "PAGER":"0x104a5cee0",
+            "LSCOLORS":"0x104a5cf00",
+            "PATH":"0x104a5cf20",
+            "TERMINAL_EMULATOR":"0x104a5cf40",
+            "_":"0x104a5cf60",
+            "__CFBundleIdentifier":"0x104a5cf80",
+            "PWD":"0x104a5cfa0",
+            "P9K_SSH":"0x104a5cfc0",
+            "P9K_TTY":"0x104a5cfe0",
+            "LANG":"0x104a5d000",
+            "XPC_FLAGS":"0x104a5d020",
+            "CLAUDE_CODE_SESSION_ATTENDED":"0x104a5d040",
+            "XPC_SERVICE_NAME":"0x104a5d060",
+            "SHLVL":"0x104a5d080",
+            "HOME":"0x104a5d0a0",
+            "CLAUDE_CODE_EXECPATH":"0x104a5d0c0",
+            "PROCESS_LAUNCHED_BY_CW":"0x104a5d0e0",
+            "LESS":"0x104a5d100",
+            "LOGNAME":"0x104a5d120",
+            "LC_CTYPE":"0x104a5d140",
+            "COREPACK_ENABLE_AUTO_PIN":"0x104a5d160",
+            "CLAUDE_CODE_SESSION_ID":"0x104a5d180",
+            "_P9K_SSH_TTY":"0x104a5d1a0",
+            "DISPLAY":"0x104a5d1c0",
+            "OSLogRateLimit":"0x104a5d1e0",
+            "CLAUDECODE":"0x104a5d200",
+            "CLAUDE_CODE_MESSAGING_SOCKET":"0x104a5d220",
+            "FIG_TERM":"0x104a5d240",
+            "PHP_SELF":"0x104a5d260",
+            "SCRIPT_NAME":"0x104a5d280",
+            "SCRIPT_FILENAME":"0x104a5d2a0",
+            "PATH_TRANSLATED":"0x104a5d2c0",
+            "DOCUMENT_ROOT":"0x104a5d2e0",
+            "REQUEST_TIME_FLOAT":"0x104a5d300",
+            "REQUEST_TIME":"0x104a5d320",
+            "argv":"0x104a5d340",
+            "argc":"0x104a5d360"
+        }
+
+    },
+    "0x104a5cc00" : {
+        "type" : "string",
+        "size" : "48",
+        "is_root" : false
+
+
+    },
+    "0x104a5cc20" : {
+        "type" : "string",
+        "size" : "17",
+        "is_root" : false
+
+
+    },
+    "0x104a5cc40" : {
+        "type" : "string",
+        "size" : "22",
+        "is_root" : false
+
+
+    },
+    "0x104a5cc60" : {
+        "type" : "string",
+        "size" : "19",
+        "is_root" : false
+
+
+    },
+    "0x104a5cc80" : {
+        "type" : "string",
+        "size" : "28",
+        "is_root" : false
+
+
+    },
+    "0x104a5cca0" : {
+        "type" : "string",
+        "size" : "18",
+        "is_root" : false
+
+
+    },
+    "0x104a5ccc0" : {
+        "type" : "string",
+        "size" : "30",
+        "is_root" : false
+
+
+    },
+    "0x104a5cce0" : {
+        "type" : "string",
+        "size" : "24",
+        "is_root" : false
+
+
+    },
+    "0x104a5cd00" : {
+        "type" : "string",
+        "size" : "21",
+        "is_root" : false
+
+
+    },
+    "0x104a5cd20" : {
+        "type" : "string",
+        "size" : "17",
+        "is_root" : false
+
+
+    },
+    "0x104a5cd40" : {
+        "type" : "string",
+        "size" : "65",
+        "is_root" : false
+
+
+    },
+    "0x104a5cd60" : {
+        "type" : "string",
+        "size" : "52",
+        "is_root" : false
+
+
+    },
+    "0x104a5cd80" : {
+        "type" : "string",
+        "size" : "47",
+        "is_root" : false
+
+
+    },
+    "0x104a5cda0" : {
+        "type" : "string",
+        "size" : "20",
+        "is_root" : false
+
+
+    },
+    "0x104a5cdc0" : {
+        "type" : "string",
+        "size" : "20",
+        "is_root" : false
+
+
+    },
+    "0x104a5cde0" : {
+        "type" : "string",
+        "size" : "41",
+        "is_root" : false
+
+
+    },
+    "0x104a5ce00" : {
+        "type" : "string",
+        "size" : "17",
+        "is_root" : false
+
+
+    },
+    "0x104a5ce20" : {
+        "type" : "string",
+        "size" : "41",
+        "is_root" : false
+
+
+    },
+    "0x104a5ce40" : {
+        "type" : "string",
+        "size" : "29",
+        "is_root" : false
+
+
+    },
+    "0x104a5ce60" : {
+        "type" : "string",
+        "size" : "101",
+        "is_root" : false
+
+
+    },
+    "0x104a5ce80" : {
+        "type" : "string",
+        "size" : "24",
+        "is_root" : false
+
+
+    },
+    "0x104a5cea0" : {
+        "type" : "string",
+        "size" : "63",
+        "is_root" : false
+
+
+    },
+    "0x104a5cec0" : {
+        "type" : "string",
+        "size" : "29",
+        "is_root" : false
+
+
+    },
+    "0x104a5cee0" : {
+        "type" : "string",
+        "size" : "20",
+        "is_root" : false
+
+
+    },
+    "0x104a5cf00" : {
+        "type" : "string",
+        "size" : "38",
+        "is_root" : false
+
+
+    },
+    "0x104a5cf20" : {
+        "type" : "string",
+        "size" : "660",
+        "is_root" : false
+
+
+    },
+    "0x104a5cf40" : {
+        "type" : "string",
+        "size" : "34",
+        "is_root" : false
+
+
+    },
+    "0x104a5cf60" : {
+        "type" : "string",
+        "size" : "59",
+        "is_root" : false
+
+
+    },
+    "0x104a5cf80" : {
+        "type" : "string",
+        "size" : "35",
+        "is_root" : false
+
+
+    },
+    "0x104a5cfa0" : {
+        "type" : "string",
+        "size" : "62",
+        "is_root" : false
+
+
+    },
+    "0x104a5cfc0" : {
+        "type" : "string",
+        "size" : "17",
+        "is_root" : false
+
+
+    },
+    "0x104a5cfe0" : {
+        "type" : "string",
+        "size" : "19",
+        "is_root" : false
+
+
+    },
+    "0x104a5d000" : {
+        "type" : "string",
+        "size" : "23",
+        "is_root" : false
+
+
+    },
+    "0x104a5d020" : {
+        "type" : "string",
+        "size" : "19",
+        "is_root" : false
+
+
+    },
+    "0x104a5d040" : {
+        "type" : "string",
+        "size" : "17",
+        "is_root" : false
+
+
+    },
+    "0x104a5d060" : {
+        "type" : "string",
+        "size" : "17",
+        "is_root" : false
+
+
+    },
+    "0x104a5d080" : {
+        "type" : "string",
+        "size" : "17",
+        "is_root" : false
+
+
+    },
+    "0x104a5d0a0" : {
+        "type" : "string",
+        "size" : "36",
+        "is_root" : false
+
+
+    },
+    "0x104a5d0c0" : {
+        "type" : "string",
+        "size" : "73",
+        "is_root" : false
+
+
+    },
+    "0x104a5d0e0" : {
+        "type" : "string",
+        "size" : "17",
+        "is_root" : false
+
+
+    },
+    "0x104a5d100" : {
+        "type" : "string",
+        "size" : "18",
+        "is_root" : false
+
+
+    },
+    "0x104a5d120" : {
+        "type" : "string",
+        "size" : "29",
+        "is_root" : false
+
+
+    },
+    "0x104a5d140" : {
+        "type" : "string",
+        "size" : "21",
+        "is_root" : false
+
+
+    },
+    "0x104a5d160" : {
+        "type" : "string",
+        "size" : "17",
+        "is_root" : false
+
+
+    },
+    "0x104a5d180" : {
+        "type" : "string",
+        "size" : "52",
+        "is_root" : false
+
+
+    },
+    "0x104a5d1a0" : {
+        "type" : "string",
+        "size" : "28",
+        "is_root" : false
+
+
+    },
+    "0x104a5d1c0" : {
+        "type" : "string",
+        "size" : "67",
+        "is_root" : false
+
+
+    },
+    "0x104a5d1e0" : {
+        "type" : "string",
+        "size" : "18",
+        "is_root" : false
+
+
+    },
+    "0x104a5d200" : {
+        "type" : "string",
+        "size" : "17",
+        "is_root" : false
+
+
+    },
+    "0x104a5d220" : {
+        "type" : "string",
+        "size" : "40",
+        "is_root" : false
+
+
+    },
+    "0x104a5d240" : {
+        "type" : "string",
+        "size" : "17",
+        "is_root" : false
+
+
+    },
+    "0x104a5d260" : {
+        "type" : "string",
+        "size" : "98",
+        "is_root" : false
+
+
+    },
+    "0x104a5d280" : {
+        "type" : "string",
+        "size" : "98",
+        "is_root" : false
+
+
+    },
+    "0x104a5d2a0" : {
+        "type" : "string",
+        "size" : "98",
+        "is_root" : false
+
+
+    },
+    "0x104a5d2c0" : {
+        "type" : "string",
+        "size" : "98",
+        "is_root" : false
+
+
+    },
+    "0x104a5d2e0" : {
+        "type" : "string",
+        "size" : "16",
+        "is_root" : false
+
+
+    },
+    "0x104a5d300" : {
+        "type" : "float",
+        "size" : "16",
+        "is_root" : false
+
+
+    },
+    "0x104a5d320" : {
+        "type" : "int",
+        "size" : "16",
+        "is_root" : false
+
+
+    },
+    "0x104a5d340" : {
+        "type" : "array",
+        "size" : "72",
+        "is_root" : false
+,
+        "children" : {
+            "0":"0x104a61008",
+            "1":"0x104a61018",
+            "2":"0x104a61028"
+        }
+
+    },
+    "0x104a5d360" : {
+        "type" : "int",
+        "size" : "16",
+        "is_root" : false
+
+
+    },
+    "0x104a19070" : {
+        "type" : "array",
+        "size" : "72",
+        "symbol_name" : "scenarios",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+,
+        "children" : {
+            "parity/basic":"0x104a6f2c0",
+            "parity/leak-before":"0x104a6f2e0",
+            "parity/leak-after":"0x104a6f300",
+            "ui-only/invalid-utf8":"0x104a6f320",
+            "ui-only/nul-keys":"0x104a6f340",
+            "ui-only/dup-private":"0x104a6f360",
+            "ui-only/lost-root":"0x104a6f380"
+        }
+
+    },
+    "0x104a6f2c0" : {
+        "type" : "string",
+        "size" : "30",
+        "is_root" : false
+
+
+    },
+    "0x104a6f2e0" : {
+        "type" : "string",
+        "size" : "36",
+        "is_root" : false
+
+
+    },
+    "0x104a6f300" : {
+        "type" : "string",
+        "size" : "35",
+        "is_root" : false
+
+
+    },
+    "0x104a6f320" : {
+        "type" : "string",
+        "size" : "37",
+        "is_root" : false
+
+
+    },
+    "0x104a6f340" : {
+        "type" : "string",
+        "size" : "33",
+        "is_root" : false
+
+
+    },
+    "0x104a6f360" : {
+        "type" : "string",
+        "size" : "36",
+        "is_root" : false
+
+
+    },
+    "0x104a6f380" : {
+        "type" : "string",
+        "size" : "34",
+        "is_root" : false
+
+
+    },
+    "0x104a19090" : {
+        "type" : "null",
+        "size" : "16",
+        "symbol_name" : "command",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+
+
+    },
+    "0x104a190a0" : {
+        "type" : "null",
+        "size" : "16",
+        "symbol_name" : "extension",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+
+
+    },
+    "0x104a190b0" : {
+        "type" : "string",
+        "size" : "37",
+        "symbol_name" : "function",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+
+
+    },
+    "0x104a190c0" : {
+        "type" : "null",
+        "size" : "16",
+        "symbol_name" : "name",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+
+
+    },
+    "0x104a190d0" : {
+        "type" : "string",
+        "size" : "106",
+        "symbol_name" : "out",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+
+
+    },
+    "0x104a190e0" : {
+        "type" : "null",
+        "size" : "16",
+        "symbol_name" : "code",
+        "is_root" : true,
+        "frame" : "<GLOBAL>"
+
+
+    }
+}
+}

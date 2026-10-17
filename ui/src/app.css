@@ -1,0 +1,291 @@
+/*
+ * Design tokens. Product UI: one system font family, a fixed rem scale
+ * (~1.125), restrained neutrals with a second layer for the side nav, and the
+ * accent kept for selection and primary actions. No external fonts: nothing
+ * may leave the page.
+ */
+:root {
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.875rem;
+  --text-lg: 1rem;
+  --text-xl: 1.125rem;
+  --text-2xl: 1.375rem;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --row-height: 30px;
+  --motion: 160ms ease-out;
+
+  /* Neutrals */
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f6f7f9;
+  --surface-nav: #f1f3f6;
+  --surface-hover: #eef1f5;
+  --border: #e3e6eb;
+  --border-strong: #c9ced6;
+  --text: #16191f;
+  --text-muted: #5b6370;
+  --text-faint: #8a919c;
+
+  /* Accent (selection, primary actions) */
+  --accent: #2f5bd3;
+  --accent-hover: #264bb2;
+  --accent-text: #ffffff;
+  --accent-soft: #e8eefc;
+  --focus: #2f5bd3;
+
+  /* States */
+  --danger: #c4322b;
+  --danger-soft: #fdecea;
+  --warning: #9a6200;
+  --warning-soft: #fff4dc;
+  --success: #1f7a43;
+  --success-soft: #e5f5eb;
+  --info-soft: #eef2f7;
+
+  /* Data bars */
+  --bar: #c7d4f5;
+  --bar-strong: #2f5bd3;
+
+  color-scheme: light dark;
+  font: var(--text-md) / 1.45 var(--font-sans);
+  color: var(--text);
+  background: var(--surface);
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #111317;
+    --surface-raised: #171a1f;
+    --surface-sunken: #0c0e11;
+    --surface-nav: #15181d;
+    --surface-hover: #1f232a;
+    --border: #262b33;
+    --border-strong: #363c46;
+    --text: #e6e8ec;
+    --text-muted: #a2a9b5;
+    --text-faint: #6f7682;
+
+    --accent: #6f95f2;
+    --accent-hover: #86a7f5;
+    --accent-text: #0b0f1a;
+    --accent-soft: #1b2539;
+    --focus: #86a7f5;
+
+    --danger: #f08a83;
+    --danger-soft: #3a1c1b;
+    --warning: #e2b25b;
+    --warning-soft: #33280f;
+    --success: #74c993;
+    --success-soft: #16301f;
+    --info-soft: #1a1f27;
+
+    --bar: #2a3a5e;
+    --bar-strong: #6f95f2;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+code,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Buttons: one vocabulary across the app. */
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 30px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--motion), border-color var(--motion);
+  white-space: nowrap;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.button:active:not(:disabled) {
+  background: var(--border);
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.button.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.button.quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.button.quiet:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.button.danger {
+  color: var(--danger);
+}
+
+input[type='text'],
+select {
+  height: 30px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+
+input[type='text']:hover,
+select:hover {
+  border-color: var(--text-faint);
+}
+
+input[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+  background: var(--info-soft);
+  color: var(--text-muted);
+}
+
+.badge.root {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.badge.shared {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.badge.new {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.notice {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--info-soft);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.notice.warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.notice.danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.skeleton {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--surface-sunken), var(--surface-hover), var(--surface-sunken));
+  background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+  * {
+    transition: none !important;
+  }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
