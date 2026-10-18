@@ -40,6 +40,9 @@ To build against a specific PHP installation, override the toolchain variables:
 $ make build PHPIZE=/usr/local/php-7.4/bin/phpize PHP_CONFIG=/usr/local/php-7.4/bin/php-config
 ```
 
+The reported version and copyright year are build arguments (`make build MEMINFO_VERSION=2.1.0`); see
+[Development](doc/development.md#version-and-copyright-year).
+
 ### Compilation
 
 From the `extension` directory:
@@ -92,7 +95,7 @@ meminfo_dump(fopen('/tmp/my_dump_file.json', 'w'));
 ```
 
 This writes a dump of the PHP memory, as JSON, to the given stream: a file, or `php://stdout`. It
-throws `RuntimeException` when the stream cannot be written to. [`doc/example.php`](doc/example.php)
+throws `RuntimeException` when the stream cannot be written to, or when the dump is incomplete. [`doc/example.php`](doc/example.php)
 is a minimal script (`make dump-example` runs it).
 
 ### Dumping a running process

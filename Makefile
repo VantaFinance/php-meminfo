@@ -24,19 +24,25 @@ PHP_CONFIG ?= php-config
 
 CONFIGURE_FLAGS ?= --enable-meminfo --with-php-config=$(PHP_CONFIG)
 
+# --- Version and copyright year ---
+# Empty means configure's default: extension/VERSION for the version, the year
+# of SOURCE_DATE_EPOCH (or the current year) for the copyright notice.
+#   make build MEMINFO_VERSION=2.1.0 MEMINFO_COPYRIGHT_YEAR=2026
+MEMINFO_VERSION        ?=
+MEMINFO_COPYRIGHT_YEAR ?=
+MEMINFO_CONFIGURE_FLAGS := $(if $(MEMINFO_VERSION),--with-meminfo-version=$(MEMINFO_VERSION)) \
+                           $(if $(MEMINFO_COPYRIGHT_YEAR),--with-meminfo-copyright-year=$(MEMINFO_COPYRIGHT_YEAR))
+
 # --- Build artifacts ---
 EXT_SO      := $(EXT_DIR)/modules/meminfo.so
-EXT_SOURCES := $(EXT_DIR)/meminfo.c $(EXT_DIR)/php_meminfo.h
+# Same list as PHP_NEW_EXTENSION in extension/config.m4, plus the headers
+EXT_SOURCES := $(addprefix $(EXT_DIR)/,meminfo.c writer.c ptr_set.c traverse.c items.c fibers.c \
+                 signal.c procinfo.c trigger.c internal.h php_meminfo.h)
 
 # --- Test runner ---
 # REPORT_EXIT_STATUS=1 makes failing .phpt tests return a non-zero exit code.
 # NO_INTERACTION=1 suppresses the "submit report?" prompt.
 TEST_ENV := REPORT_EXIT_STATUS=1 NO_INTERACTION=1
-
-# --- Git ---
-VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 # ============================================================================
 .DEFAULT_GOAL := help
@@ -49,15 +55,24 @@ BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 $(EXT_DIR)/configure: $(EXT_DIR)/config.m4
 	cd $(EXT_DIR) && $(PHPIZE)
 
-$(EXT_DIR)/Makefile: $(EXT_DIR)/configure
-	cd $(EXT_DIR) && ./configure $(CONFIGURE_FLAGS)
+# The configure arguments in effect, rewritten only when they change, so that
+# changing MEMINFO_VERSION or MEMINFO_COPYRIGHT_YEAR reconfigures.
+$(EXT_DIR)/.configure-args: FORCE
+	@echo '$(strip $(CONFIGURE_FLAGS) $(MEMINFO_CONFIGURE_FLAGS))' | cmp -s - $@ \
+		|| echo '$(strip $(CONFIGURE_FLAGS) $(MEMINFO_CONFIGURE_FLAGS))' > $@
+
+$(EXT_DIR)/Makefile: $(EXT_DIR)/configure $(EXT_DIR)/.configure-args $(EXT_DIR)/VERSION
+	cd $(EXT_DIR) && ./configure $(CONFIGURE_FLAGS) $(MEMINFO_CONFIGURE_FLAGS)
 
 $(EXT_SO): $(EXT_DIR)/Makefile $(EXT_SOURCES)
 	$(MAKE) -C $(EXT_DIR)
 
 .PHONY: build
-build: $(EXT_SO) ## Build the C extension (phpize + configure + make as needed)
-	@echo "Built $(EXT_SO) ($(VERSION), $(COMMIT), $(BUILD_TIME))"
+build: $(EXT_SO) ## Build the C extension (usage: make build [MEMINFO_VERSION=X.Y.Z] [MEMINFO_COPYRIGHT_YEAR=YYYY])
+	@echo "Built $(EXT_SO) with:"; grep -E '^#define MEMINFO_(VERSION|COPYRIGHT_YEAR) ' $(EXT_DIR)/config.h
+
+.PHONY: FORCE
+FORCE:
 
 # Sequential sub-makes, so that `make -j rebuild` cannot build while it cleans.
 .PHONY: rebuild
@@ -146,7 +161,9 @@ docker-build: ## Build image meminfo:php-X.Y with the extension (usage: make doc
 		echo "error: unsupported PHP_VERSION=$(PHP_VERSION), expected one of: $(PHP_VERSIONS)" >&2; \
 		exit 1; \
 	fi
-	$(DOCKER) build $(DOCKER_PLATFORM_FLAG) --build-arg PHP_VERSION=$(PHP_VERSION) -t $(DOCKER_TAG) .
+	$(DOCKER) build $(DOCKER_PLATFORM_FLAG) --build-arg PHP_VERSION=$(PHP_VERSION) \
+		--build-arg MEMINFO_VERSION=$(MEMINFO_VERSION) --build-arg MEMINFO_COPYRIGHT_YEAR=$(MEMINFO_COPYRIGHT_YEAR) \
+		-t $(DOCKER_TAG) .
 	@echo "Built image $(DOCKER_TAG)"
 
 .PHONY: docker-test
@@ -297,7 +314,7 @@ clean-ext: ## Remove extension build artifacts and the generated build system
 	fi
 	@# What phpize --clean leaves behind: autoconf backups (configure~,
 	@# config.h.in~), the include/ directory and run-tests.php output.
-	rm -rf $(EXT_DIR)/include $(EXT_DIR)/*~ $(EXT_DIR)/run-tests.php $(EXT_DIR)/tmp-php.ini
+	rm -rf $(EXT_DIR)/include $(EXT_DIR)/*~ $(EXT_DIR)/run-tests.php $(EXT_DIR)/tmp-php.ini $(EXT_DIR)/.configure-args
 	rm -f $(EXT_DIR)/tests/*.out $(EXT_DIR)/tests/*.diff $(EXT_DIR)/tests/*.exp \
 		$(EXT_DIR)/tests/*.log $(EXT_DIR)/tests/*.sh $(EXT_DIR)/tests/*.mem \
 		$(EXT_DIR)/tests/*.php.tmp $(EXT_DIR)/tests/*.php

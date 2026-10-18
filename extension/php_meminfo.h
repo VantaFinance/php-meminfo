@@ -26,14 +26,25 @@ extern zend_module_entry meminfo_module_entry;
 #endif
 
 #define MEMINFO_NAME "PHP Meminfo"
-#define MEMINFO_VERSION "2.0.0-beta1"
 #define MEMINFO_AUTHOR "Benoit Jacquemont"
-#define MEMINFO_COPYRIGHT  "Copyright (c) 2010-2021 by Benoit Jacquemont & contributors"
-#define MEMINFO_COPYRIGHT_SHORT "Copyright (c) 2010-2021"
+
+// Both come from configure (--with-meminfo-version, --with-meminfo-copyright-year)
+// through config.h; the fallbacks only serve IDE parsing and -D overrides.
+#ifndef MEMINFO_VERSION
+# define MEMINFO_VERSION "dev"
+#endif
+#ifndef MEMINFO_COPYRIGHT_YEAR
+# define MEMINFO_COPYRIGHT_YEAR "unknown"
+#endif
+
+#define MEMINFO_COPYRIGHT_SHORT "Copyright (c) 2010-" MEMINFO_COPYRIGHT_YEAR
+#define MEMINFO_COPYRIGHT MEMINFO_COPYRIGHT_SHORT " by Benoit Jacquemont & contributors"
 
 // Size of the writer's staging buffer. Big enough that a dump of a large object
-// graph costs hundreds of writes rather than millions.
-#define MEMINFO_WRITER_BUFFER_SIZE 65536
+// graph costs hundreds of writes rather than millions; 1 MiB measured 10-15%
+// faster than 64 KiB on every supported version. The writer is always malloc'd
+// (see below) — never put one on the stack.
+#define MEMINFO_WRITER_BUFFER_SIZE (1024 * 1024)
 
 /**
  * Output sink of a dump.
@@ -43,8 +54,8 @@ extern zend_module_entry meminfo_module_entry;
  * working) or straight to a file descriptor — a dump triggered from an
  * interrupt has no php_stream and must not allocate one.
  *
- * Once a write fails, err is set and every later append is dropped: the
- * traversal notices and stops instead of spending minutes producing output
+ * Once a write fails, err holds its errno and every later append is dropped:
+ * the traversal notices and stops instead of spending minutes producing output
  * that cannot be stored.
  *
  * Allocate it with malloc, never emalloc: the buffer must not be charged to
@@ -55,7 +66,7 @@ typedef struct {
     php_stream *stream;     /* flush through the stream layer, or NULL */
     int fd;                 /* flush with write(2), or -1 */
     size_t len;             /* bytes staged in buf */
-    int err;                /* a write failed; output is being discarded */
+    int err;                /* errno of the write that failed (never 0 then); output is being discarded */
     char buf[MEMINFO_WRITER_BUFFER_SIZE];
 } meminfo_writer;
 
@@ -151,15 +162,28 @@ zend_ulong   meminfo_get_element_size(zval* z);
  * <GLOBAL>. The global scope is normally reached through the main script's
  * frame, but a dump taken during shutdown — from a shutdown function or a
  * destructor — starts from a chain that no longer contains it.
+ *
+ * Returns MEMINFO_DUMP_COMPLETE, or why the dump is not: MEMINFO_DUMP_INCOMPLETE
+ * when the walk ran out of memory for its own bookkeeping (the output is still
+ * closed as valid JSON, with items missing), MEMINFO_DUMP_WRITE_FAILED when the
+ * sink refused bytes (w->err holds the errno). Either way the caller must not
+ * present the result as a complete dump.
+ *
+ * The walk's own state is freed on every path, a Zend bailout included (a fatal
+ * error raised by a get_properties() or get_gc() handler mid-walk): it is
+ * released, then the bailout continues to the caller, which must clean up what
+ * it owns — the writer, the file — in a zend_try of its own.
  */
-void meminfo_dump_to_writer(meminfo_writer *w, zend_execute_data *start_frame, int include_global_symbol_table);
+#define MEMINFO_DUMP_COMPLETE      0
+#define MEMINFO_DUMP_INCOMPLETE    1
+#define MEMINFO_DUMP_WRITE_FAILED  2
+
+int meminfo_dump_to_writer(meminfo_writer *w, zend_execute_data *start_frame, int include_global_symbol_table);
 
 // The traversal itself (frames, static members, items and their children) is
 // internal to meminfo.c: it is driven by context and bookkeeping types that
 // callers of the extension have no business knowing about.
 
 void meminfo_build_frame_label(char * frame_label, int frame_label_len, zend_execute_data* frame);
-
-extern zend_module_entry meminfo_entry;
 
 #endif

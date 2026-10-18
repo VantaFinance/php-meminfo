@@ -54,6 +54,7 @@ extension/modules
 extension/run-tests.php
 extension/include
 extension/tmp-php.ini
+extension/.configure-args
 
 # Extension: .phpt test outputs
 extension/tests/*.out

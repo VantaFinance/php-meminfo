@@ -36,6 +36,29 @@ $ REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test
 Every change must keep the PHP 7.0 – 8.5 CI matrix green; engine API differences are handled with
 `PHP_VERSION_ID` preprocessor guards.
 
+Version and copyright year
+--------------------------
+
+The version `phpversion('meminfo')` and `phpinfo()` report, and the last year of the copyright
+notice, are build arguments:
+
+| configure option | Make variable | Docker build arg | Default |
+|---|---|---|---|
+| `--with-meminfo-version=VER` | `MEMINFO_VERSION` | `MEMINFO_VERSION` | content of `extension/VERSION` |
+| `--with-meminfo-copyright-year=YYYY` | `MEMINFO_COPYRIGHT_YEAR` | `MEMINFO_COPYRIGHT_YEAR` | year of `SOURCE_DATE_EPOCH` when set, else the current year |
+
+```bash
+$ make build MEMINFO_VERSION=2.1.0 MEMINFO_COPYRIGHT_YEAR=2026
+$ make docker-build PHP_VERSION=8.3 MEMINFO_VERSION=2.1.0
+$ ./configure --with-meminfo-version=2.1.0 --with-meminfo-copyright-year=2026   # without Make
+```
+
+The version may contain only letters, digits and `. + ~ -`; configure rejects anything else. `make
+build` reconfigures whenever either value changes and prints what the build uses. CI builds a tag as
+its name (without a leading `v`), any other commit as `<VERSION>+g<short sha>`, with the year of the
+commit date, so the same commit always builds the same strings. A build with no arguments at all
+(`phpize && ./configure`, PECL) uses the defaults.
+
 Building and testing in Docker
 ------------------------------
 

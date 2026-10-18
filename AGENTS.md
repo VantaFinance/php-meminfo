@@ -27,9 +27,19 @@ analyzer has been removed; the UI replaces it.)
 
 ```
 extension/                    C extension for the Zend Engine
-  meminfo.c                   all extension implementation
+  meminfo.c                   module entry: arginfo, ini, MINIT…MINFO, meminfo_dump()
+  writer.c                    buffered writer, JSON escaper, integer/pointer formatting
+  ptr_set.c                   set of visited item addresses
+  traverse.c                  work stack, frames and the other roots (statics, callbacks, constants)
+  items.c                     one item and its "children" block per zval
+  fibers.c                    suspended fiber contexts via the fiber observers (PHP 8.1+)
+  signal.c                    target side: dump_signal, signal handler, interrupt hook, dump to file
+  procinfo.c                  facts about another process (/proc or sysctl, uids, start time)
+  trigger.c                   trigger side: meminfo_dump_process()
+  internal.h                  declarations shared by the .c files (all MEMINFO_HIDDEN), not an API
   php_meminfo.h               public prototypes, module globals, version/copyright macros
-  config.m4                   phpize/autotools build definition
+  config.m4                   phpize/autotools build definition (version/year options, source list)
+  VERSION                     default version when configure gets no --with-meminfo-version
   dump-meminfo                CLI wrapper over meminfo_dump_process() (installed by make install-cli)
   tests/                      .phpt tests
     fixtures/                 shared PHP fixtures for tests
@@ -62,13 +72,24 @@ Dependency direction in the UI: `components/` → `state/` → `worker/` client 
 `worker/session.ts` → `engine/`. The page side imports only types from `engine/`; `engine/` is pure
 TypeScript with no DOM and is the layer covered by Vitest.
 
+## Extension file naming
+
+- Module files carry no `meminfo_` prefix (`writer.c`, `internal.h`); only `meminfo.c` (module
+  entry) and `php_meminfo.h` (the phpize/PECL `php_<ext>.h` convention) keep it.
+- Every non-static symbol keeps the `meminfo_` prefix and, unless it is in `php_meminfo.h`, is
+  declared `MEMINFO_HIDDEN` in `internal.h`: `nm -D modules/meminfo.so` must list only
+  `get_module`, the two `zif_` functions and the three `php_meminfo.h` functions.
+- No header in `extension/` may share a name with a system or PHP header (`signal.h`, `config.h`,
+  `php.h`, …): phpize compiles with `-I.`, so it would shadow the real one.
+
 ## Key Entry Points
 
 | File | Purpose |
 |---|---|
-| `extension/meminfo.c` | Implements `meminfo_dump()` and `meminfo_dump_process()`, the memory traversal, the buffered writer, and the signal/interrupt path that dumps on request |
-| `extension/php_meminfo.h` | Exported prototypes, the writer type, module globals, `MEMINFO_VERSION`, copyright macros |
-| `extension/config.m4` | Build definition — new `.c` files must be registered here |
+| `extension/meminfo.c` | Module entry and `meminfo_dump()`; the traversal is `traverse.c` + `items.c`, the writer `writer.c`, the signal path `signal.c`, `meminfo_dump_process()` `trigger.c` |
+| `extension/internal.h` | Types and prototypes shared between the extension's `.c` files; every cross-file function is `MEMINFO_HIDDEN` |
+| `extension/php_meminfo.h` | Exported prototypes, the writer type, module globals, `MEMINFO_VERSION`/copyright fallbacks |
+| `extension/config.m4` | Build definition — `--with-meminfo-version`/`--with-meminfo-copyright-year`; new `.c` files must be registered here and in `CMakeLists.txt` |
 | `extension/dump-meminfo` | `dump-meminfo <pid>` command; prints the path of the dump the target wrote |
 | `ui/src/lib/engine/parser.ts` | The UI's only reader of dump files: streaming tokenizer into the columnar `DumpStore` |
 | `ui/src/lib/worker/session.ts` | Everything one dump worker answers; `dump.worker.ts` wires it to messages |

@@ -73,15 +73,24 @@ jobs:
           ')
           echo "PROTOBUF_SO=$protobuf" >> "$GITHUB_ENV"
 
+      # Reproducible version and year: the tag name for a tag build, else
+      # extension/VERSION plus the commit; the year of the commit date.
       - name: Build the extension
         run: |
           cd extension/
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(cat VERSION)+g${GITHUB_SHA::7}"
+          fi
+          year=$(git log -1 --format=%cd --date=format:%Y)
           phpize
           if [ "${{ matrix.sigqueue }}" = "no" ]; then
             export ac_cv_func_sigqueue=no
           fi
-          ./configure
+          ./configure --with-meminfo-version="$version" --with-meminfo-copyright-year="$year"
           make
+          php -d extension=$PWD/modules/meminfo.so --ri meminfo | grep -E '^(Version|Copyright)'
 
       # On macOS sigqueue() is absent by itself; the check proves the kill path is the one tested.
       - name: Check that sigqueue() is disabled

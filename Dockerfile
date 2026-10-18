@@ -16,18 +16,24 @@ WORKDIR /src
 
 FROM base AS build
 
+# Version and copyright year of the build (make docker-build MEMINFO_VERSION=…).
+# Empty means configure's default. Declared here, not in base, so that changing
+# them never invalidates the cached toolchain layer. Kept in the environment so
+# that `make test-ext` inside the image sees the same values and does not
+# reconfigure.
+ARG MEMINFO_VERSION=
+ARG MEMINFO_COPYRIGHT_YEAR=
+ENV MEMINFO_VERSION=${MEMINFO_VERSION} MEMINFO_COPYRIGHT_YEAR=${MEMINFO_COPYRIGHT_YEAR}
+
 COPY extension/ /src/extension/
+COPY Makefile /src/Makefile
 
 RUN set -eux; \
-    cd /src/extension; \
-    phpize; \
-    ./configure --enable-meminfo; \
-    make; \
-    make install; \
+    make build; \
+    make -C extension install; \
     docker-php-ext-enable meminfo; \
-    php -m | grep -qx meminfo
-
-COPY Makefile /src/Makefile
+    php -m | grep -qx meminfo; \
+    php --ri meminfo | grep -E '^(Version|Copyright)'
 COPY doc/ /src/doc/
 
 # The CLI wrapper for dumping other processes; handy for poking at a worker

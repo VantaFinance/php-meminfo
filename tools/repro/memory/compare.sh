@@ -23,11 +23,10 @@ fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-mkdir -p "$WORK/baseline-ext"
-
-for file in meminfo.c php_meminfo.h config.m4; do
-    git -C "$REPO" show "$BASE_REV:extension/$file" > "$WORK/baseline-ext/$file"
-done
+# The whole extension/ tree of the baseline: its source list (and VERSION file)
+# depends on the revision.
+git -C "$REPO" archive "$BASE_REV" extension | tar -x -C "$WORK"
+mv "$WORK/extension" "$WORK/baseline-ext"
 
 docker run --rm \
     -v "$REPO/extension:/repo-ext:ro" \

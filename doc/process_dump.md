@@ -68,8 +68,10 @@ try {
 ```
 
 `meminfo_dump()` throws `RuntimeException` as well, when the dump cannot be written to the stream it
-was given. Note that the stream then holds a partial dump: the bytes written before the failure are
-not rolled back, unlike the signal path, which writes to a temporary file and removes it.
+was given, or when it is incomplete because the extension ran out of memory for its own bookkeeping
+(the stream then holds valid JSON with items missing). Note that the stream holds a partial dump
+either way: the bytes written before the failure are not rolled back, unlike the signal path, which
+writes to a temporary file and removes it.
 
 `dump-meminfo` maps the same distinction onto its exit code:
 
