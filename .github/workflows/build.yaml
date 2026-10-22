@@ -1,4 +1,4 @@
-name: Build the extension and test the analyzers
+name: Build and test the extension
 
 on: push
 
@@ -73,15 +73,24 @@ jobs:
           ')
           echo "PROTOBUF_SO=$protobuf" >> "$GITHUB_ENV"
 
+      # Reproducible version and year: the tag name for a tag build, else
+      # extension/VERSION plus the commit; the year of the commit date.
       - name: Build the extension
         run: |
           cd extension/
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(cat VERSION)+g${GITHUB_SHA::7}"
+          fi
+          year=$(git log -1 --format=%cd --date=format:%Y)
           phpize
           if [ "${{ matrix.sigqueue }}" = "no" ]; then
             export ac_cv_func_sigqueue=no
           fi
-          ./configure
+          ./configure --with-meminfo-version="$version" --with-meminfo-copyright-year="$year"
           make
+          php -d extension=$PWD/modules/meminfo.so --ri meminfo | grep -E '^(Version|Copyright)'
 
       # On macOS sigqueue() is absent by itself; the check proves the kill path is the one tested.
       - name: Check that sigqueue() is disabled
@@ -117,8 +126,30 @@ jobs:
             extension/tests/*.out
             extension/tests/*.diff
 
-      - name: Test the analyzers
+  # ext-swoole, so the Swoole tests run instead of skipping, plus the coroutine
+  # scenarios of tools/repro/swoole (dumps from inside a coroutine, 10 000
+  # suspended coroutines, dump-meminfo on a coroutine loop). Built in the same
+  # image as `make repro-swoole` locally.
+  swoole:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        php-versions: ['8.1', '8.3', '8.5']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # An explicit shell turns on pipefail, so a failing test still fails the step.
+      - name: Test the extension with ext-swoole loaded
+        shell: bash
+        run: make repro-swoole-test PHP_VERSION=${{ matrix.php-versions }} | tee run-tests.log
+
+      # A swoole.so that fails to load makes these tests skip, not fail.
+      - name: Check that the Swoole tests ran
         run: |
-          cd analyzer
-          composer install
-          vendor/bin/phpspec run
+          grep -E '(PASS|FAIL).*dump-swoole_coroutine' run-tests.log
+          grep -E '(PASS|FAIL).*dump-swoole_suspended_coroutines' run-tests.log
+
+      - name: Run the Swoole scenarios
+        run: make repro-swoole PHP_VERSION=${{ matrix.php-versions }}

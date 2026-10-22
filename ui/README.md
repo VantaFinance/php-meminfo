@@ -14,7 +14,7 @@ page. User-facing documentation is in the repository's README ("Analyzing a dump
 | `src/lib/components/` | `VirtualTable` (windowed, paged, height-capped), load/progress/recovery screens, `Inspector`, `AddressLink`, `views/` |
 | `src/lib/components/graph/` | The Graph view's drawing: `elements.ts` (result → Cytoscape elements, style, layout; pure, tested headless) and `GraphCanvas.svelte` (one Cytoscape instance, destroyed with the canvas) |
 | `scripts/gen-dump.ts` | Synthetic dumps with the extension's exact byte layout |
-| `tests/fixtures/` | Real dumps: `parity/` (also readable by the PHP analyzer, with `*.expected.json` baselines) and `ui-only/` (quirks the PHP analyzer cannot open). They are regenerated through the extension, so the layout of older extensions is covered by a dump kept inline in `parser.test.ts` |
+| `tests/fixtures/` | Real dumps: `parity/` (frozen, with `*.expected.json` baselines recorded by the former PHP CLI analyzer) and `ui-only/` (quirks `json_decode` loses or rejects). They are regenerated through the extension, so the layout of older extensions is covered by a dump kept inline in `parser.test.ts` |
 | `tests-e2e/` | Playwright: app flow, privacy, memory budget, crash recovery, graph |
 
 ## Commands
@@ -33,8 +33,9 @@ node scripts/gen-dump.ts out.json --requests=100000 --fanout=4      # a syntheti
 ```
 
 From the repository root, `make ui-install`, `make ui-dev`, `make ui-check`, `make ui-test`,
-`make ui-e2e` do the same; `make ui-fixtures` regenerates the fixtures and the PHP analyzer
-baselines (PHP 8.1+ with meminfo, and `make install` for the analyzer).
+`make ui-e2e` do the same; `make ui-fixtures` regenerates the `ui-only/` fixtures (PHP 8.1+ with
+meminfo). The `parity/` dumps are frozen: their baselines hold their exact addresses and the analyzer
+that recorded them is gone, so `make-fixtures.php` skips them unless given `--parity`.
 
 ## Deployment
 

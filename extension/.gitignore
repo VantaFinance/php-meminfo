@@ -42,3 +42,9 @@ include
 
 # PHP tests
 tmp-php.ini
+
+# autoconf backups
+*~
+
+# Configure arguments last used by the top-level Makefile
+.configure-args

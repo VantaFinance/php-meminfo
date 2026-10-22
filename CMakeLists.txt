@@ -1,4 +1,4 @@
-# IDE code insight only (CLion): gives extension/meminfo.c a project target with the Zend API
+# IDE code insight only (CLion): gives the extension sources a project target with the Zend API
 # headers on the include path. The extension itself is built with phpize — see
 # `make build` / `make docker-build`; this file is never used to produce meminfo.so.
 #
@@ -23,8 +23,18 @@ endif()
 
 message(STATUS "meminfo IDE model: PHP ${PHP_VERSION} headers from ${PHP_INCLUDE_DIR}")
 
+# Same sources as PHP_NEW_EXTENSION in extension/config.m4
 add_library(meminfo OBJECT
     extension/meminfo.c
+    extension/writer.c
+    extension/ptr_set.c
+    extension/traverse.c
+    extension/items.c
+    extension/fibers.c
+    extension/signal.c
+    extension/procinfo.c
+    extension/trigger.c
+    extension/internal.h
     extension/php_meminfo.h
 )
 
