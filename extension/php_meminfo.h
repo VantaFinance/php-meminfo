@@ -56,7 +56,7 @@ extern zend_module_entry meminfo_module_entry;
 #endif
 
 #define MEMINFO_COPYRIGHT_SHORT "Copyright (c) 2010-" MEMINFO_COPYRIGHT_YEAR
-#define MEMINFO_COPYRIGHT MEMINFO_COPYRIGHT_SHORT " by Benoit Jacquemont & contributors"
+#define MEMINFO_COPYRIGHT MEMINFO_COPYRIGHT_SHORT " by Benoit Jacquemont, Vlad Shashkov, Vanta Team & contributors"
 
 // Size of the writer's staging buffer. Big enough that a dump of a large object
 // graph costs hundreds of writes rather than millions; 1 MiB measured 10-15%
