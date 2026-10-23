@@ -16,10 +16,6 @@ extension with [PIE](https://github.com/php/pie):
 pie install vanta/meminfo
 ```
 
-Until `vanta/meminfo` is published on Packagist, install it from a checkout of
-[VantaFinance/php-meminfo](https://github.com/VantaFinance/php-meminfo):
-`pie repository:add path /path/to/php-meminfo && pie install 'vanta/meminfo:*@dev'`.
-
 Open the dump in the browser UI (nothing is uploaded): https://vantafinance.github.io/php-meminfo/
 
 This repository is a read-only split of the `cli/` directory of

@@ -62,15 +62,6 @@ another non-interactive shell, run it as root: it does not call `sudo` itself wi
 Windows is not supported. NTS and ZTS builds both work, but only NTS can be
 [dumped from outside](#dumping-a-running-process).
 
-> [!NOTE]
-> Until `vanta/meminfo` is published on Packagist, install it from a checkout of this repository.
-> This is what CI does:
->
-> ```bash
-> $ pie repository:add path /path/to/php-meminfo
-> $ pie install 'vanta/meminfo:*@dev'
-> ```
-
 ### The `dump-meminfo` command
 
 ```bash
