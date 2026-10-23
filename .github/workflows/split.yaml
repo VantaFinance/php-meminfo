@@ -70,8 +70,10 @@ jobs:
         if: steps.app.outputs.enabled == 'true'
         # v2.4.5, pinned by commit: the action gets a token with write access.
         uses: symplify/monorepo-split-github-action@14e42e2437f674b8987c1f50ca3689116aea1893
+        # The action puts the token into the remote URL as is; an App
+        # installation token authenticates only as x-access-token:<token>.
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_TOKEN: x-access-token:${{ steps.app-token.outputs.token }}
         with:
           package_directory: cli
           repository_organization: VantaFinance
