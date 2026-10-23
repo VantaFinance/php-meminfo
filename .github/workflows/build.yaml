@@ -241,10 +241,13 @@ jobs:
           echo "Archive content:"
           find "$DIST_DIR" -maxdepth 2 | sort
 
+      # As root: PIE writes into the system extension and ini directories and
+      # refuses to call sudo itself without an interactive terminal. The path
+      # repository goes into root's PIE config too, or install would not see it.
       - name: Install the extension with PIE
         run: |
-          pie repository:add path "$DIST_DIR"
-          pie install --no-interaction 'vanta/meminfo:*@dev'
+          sudo pie repository:add path "$DIST_DIR"
+          sudo pie install --no-interaction --with-php-config="$(command -v php-config)" 'vanta/meminfo:*@dev'
           php --ri meminfo | grep -E '^(Version|Copyright)'
           php -m | grep -qx meminfo
 
