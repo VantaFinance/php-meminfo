@@ -13,3 +13,7 @@
 /doc                export-ignore
 /tools              export-ignore
 /ui                 export-ignore
+
+# GitHub reports the repository language that Packagist shows: count the
+# extension, not the browser UI.
+/ui/**              -linguist-detectable
