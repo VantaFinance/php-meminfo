@@ -15,10 +15,8 @@ One of the main sources of inspiration for this tool is the Java jmap tool with 
 Compatibility
 -------------
 
-PHP 7.0 – 8.5 (tested in CI on every version). Dumping another, running process needs the target to
-be PHP 7.1 or later, non-ZTS, on POSIX.
-
-For older versions of PHP, use an older release: PHP Meminfo v1.1 for PHP 5.6, v1.0.5 for PHP 5.5.
+Minimum supported version: **PHP 7.0**. Supported: PHP 7.0 – 8.5 (tested in CI on every version).
+Dumping another, running process needs the target to be PHP 7.1 or later, non-ZTS, on POSIX.
 
 Installation
 ------------

@@ -1,3 +1,22 @@
+/**
+ * PHP Meminfo
+ *
+ * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
+ * @author    Vlad Shashkov <v.shashkov@pos-credit.ru>
+ * @copyright Copyright (c) 2010-2021, Benoit Jacquemont
+ * @copyright Copyright (c) 2026, The Vanta
+ */
+
+/*
+ * Module entry of the meminfo extension.
+ *
+ * meminfo dumps everything a PHP process holds in memory — every object, array
+ * and value reachable from the running code — as JSON, so that a memory leak
+ * can be tracked down by looking at what is actually kept alive. This file
+ * wires the extension into PHP: arginfo, ini settings, the MINIT…MINFO
+ * lifecycle and meminfo_dump(); the work itself lives in the other modules.
+ */
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

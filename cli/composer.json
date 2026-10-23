@@ -1,0 +1,24 @@
+{
+    "name": "vanta/dump-meminfo",
+    "description": "dump-meminfo command: dump the memory of a running PHP process with the meminfo extension",
+    "type": "library",
+    "keywords": ["memory", "memory leak", "meminfo", "dump", "profiling", "debug"],
+    "homepage": "https://github.com/VantaFinance/php-meminfo",
+    "license": "MIT",
+    "authors": [
+        {"name": "Benoit Jacquemont", "email": "benoit.jacquemont@gmail.com"},
+        {"name": "Vlad Shashkov", "email": "v.shashkov@pos-credit.ru"},
+        {"name": "Vanta Team", "homepage": "https://vanta.ru/"}
+    ],
+    "support": {
+        "issues": "https://github.com/VantaFinance/php-meminfo/issues",
+        "source": "https://github.com/VantaFinance/php-meminfo"
+    },
+    "require": {
+        "php": ">=7.0"
+    },
+    "suggest": {
+        "ext-meminfo": "Required at run time, by this command and by the process it dumps: pie install vanta/meminfo"
+    },
+    "bin": ["bin/dump-meminfo"]
+}

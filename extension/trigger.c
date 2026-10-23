@@ -1,4 +1,19 @@
-/* meminfo_dump_process(): asking another process for a dump and waiting for it. */
+/**
+ * PHP Meminfo
+ *
+ * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
+ * @author    Vlad Shashkov <v.shashkov@pos-credit.ru>
+ * @copyright Copyright (c) 2010-2021, Benoit Jacquemont
+ * @copyright Copyright (c) 2026, The Vanta
+ */
+
+/*
+ * meminfo_dump_process(): asking another process for a dump and waiting for it.
+ *
+ * The trigger side behind the dump-meminfo command: signals the target, then
+ * finds the file it wrote and waits until it is complete, so that a leak can
+ * be investigated in a live worker without restarting or modifying it.
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"

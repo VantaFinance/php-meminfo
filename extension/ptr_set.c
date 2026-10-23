@@ -1,4 +1,20 @@
-/* Set of visited item addresses. */
+/**
+ * PHP Meminfo
+ *
+ * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
+ * @author    Vlad Shashkov <v.shashkov@pos-credit.ru>
+ * @copyright Copyright (c) 2010-2021, Benoit Jacquemont
+ * @copyright Copyright (c) 2026, The Vanta
+ */
+
+/*
+ * Set of visited item addresses.
+ *
+ * The heap is a graph full of shared values and cycles; recording every
+ * address once written is what lets each item appear in the dump exactly once
+ * and lets the walk terminate. Allocated outside the Zend heap, so a dump does
+ * not count against memory_limit.
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"

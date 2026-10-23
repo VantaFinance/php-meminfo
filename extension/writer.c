@@ -1,4 +1,20 @@
-/* Writer: output buffering, JSON string escaping, integer and pointer formatting. */
+/**
+ * PHP Meminfo
+ *
+ * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
+ * @author    Vlad Shashkov <v.shashkov@pos-credit.ru>
+ * @copyright Copyright (c) 2010-2021, Benoit Jacquemont
+ * @copyright Copyright (c) 2026, The Vanta
+ */
+
+/*
+ * Writer: output buffering, JSON string escaping, integer and pointer formatting.
+ *
+ * The dump is composed by hand rather than built as a structure and serialised:
+ * it has to be written from a process that may already be short of memory, and
+ * for millions of items. Buffered output and a single-pass escaper keep it fast
+ * and keep a dump valid JSON whatever bytes the application's strings hold.
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"

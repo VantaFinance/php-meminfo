@@ -37,7 +37,8 @@ RUN set -eux; \
 COPY doc/ /src/doc/
 
 # The CLI wrapper for dumping other processes; handy for poking at a worker
-# from inside the image.
-RUN install -m 0755 /src/extension/dump-meminfo /usr/local/bin/dump-meminfo
+# from inside the image. The process .phpt tests run it from /src/cli.
+COPY cli/ /src/cli/
+RUN install -m 0755 /src/cli/bin/dump-meminfo /usr/local/bin/dump-meminfo
 
 CMD ["php", "-m"]

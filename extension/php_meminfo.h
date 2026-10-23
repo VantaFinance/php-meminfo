@@ -1,3 +1,21 @@
+/**
+ * PHP Meminfo
+ *
+ * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
+ * @author    Vlad Shashkov <v.shashkov@pos-credit.ru>
+ * @copyright Copyright (c) 2010-2021, Benoit Jacquemont
+ * @copyright Copyright (c) 2026, The Vanta
+ */
+
+/*
+ * Public header of the meminfo extension.
+ *
+ * What the phpize/PECL convention expects from php_<ext>.h: the module entry,
+ * the module globals, the version and copyright macros and the few functions
+ * exported from meminfo.so. Everything shared only between the extension's own
+ * source files is in internal.h instead.
+ */
+
 #ifndef PHP_MEMINFO_H
 #define PHP_MEMINFO_H 1
 

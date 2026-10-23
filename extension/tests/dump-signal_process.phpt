@@ -12,6 +12,7 @@ Check that meminfo_dump_process() dumps another running process
     // dump-signal_not_handled.phpt instead.
     if (PHP_VERSION_ID < 70100) die('skip the target side needs PHP 7.1 or later');
     if (PHP_ZTS) die('skip the target side is not available on ZTS builds');
+    if (!is_file(dirname(dirname(dirname(__FILE__))) . '/cli/bin/dump-meminfo')) die('skip cli/bin/dump-meminfo is not part of this source tree');
 ?>
 --FILE--
 <?php
@@ -74,7 +75,7 @@ CODE;
 
         $command = escapeshellarg(meminfo_test_php_binary())
             . ' -n -d ' . escapeshellarg('extension=' . meminfo_test_extension_path())
-            . ' ' . escapeshellarg(dirname(dirname(__FILE__)) . '/dump-meminfo')
+            . ' ' . escapeshellarg(dirname(dirname(dirname(__FILE__))) . '/cli/bin/dump-meminfo')
             . ' ' . (int) $pid
             . ' --dir=' . escapeshellarg($dumpDir)
             . ' --timeout=20';

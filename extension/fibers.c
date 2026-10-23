@@ -1,4 +1,20 @@
-/* Suspended fiber contexts, tracked through the fiber observers (PHP 8.1+). */
+/**
+ * PHP Meminfo
+ *
+ * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
+ * @author    Vlad Shashkov <v.shashkov@pos-credit.ru>
+ * @copyright Copyright (c) 2010-2021, Benoit Jacquemont
+ * @copyright Copyright (c) 2026, The Vanta
+ */
+
+/*
+ * Suspended fiber contexts, tracked through the fiber observers (PHP 8.1+).
+ *
+ * A suspended Fiber or Swoole coroutine keeps its locals on a stack of its
+ * own that the running frame chain never reaches. Tracking the contexts as
+ * they switch lets the dump include what they hold, which is where a leak in
+ * an async application usually sits.
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
