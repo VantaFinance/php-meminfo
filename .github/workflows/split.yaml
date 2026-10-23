@@ -25,13 +25,12 @@ jobs:
           fetch-depth: 0
 
       # Until the split repository and the GitHub App exist, skip instead of
-      # failing every push. The App's client ID is not secret (an organization or
-      # repository variable); its private key is, and is handed only to the step
-      # that mints the token.
+      # failing every push. The App's client ID and private key are repository
+      # secrets.
       - name: Check for the split GitHub App
         id: app
         env:
-          SPLIT_APP_CLIENT_ID: ${{ vars.SPLIT_APP_CLIENT_ID }}
+          SPLIT_APP_CLIENT_ID: ${{ secrets.SPLIT_APP_CLIENT_ID }}
           SPLIT_APP_PRIVATE_KEY: ${{ secrets.SPLIT_APP_PRIVATE_KEY }}
         run: |
           if [ -n "$SPLIT_APP_CLIENT_ID" ] && [ -n "$SPLIT_APP_PRIVATE_KEY" ]; then
@@ -61,7 +60,7 @@ jobs:
         # v3.2.0, pinned by commit like the split action below.
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
-          client-id: ${{ vars.SPLIT_APP_CLIENT_ID }}
+          client-id: ${{ secrets.SPLIT_APP_CLIENT_ID }}
           private-key: ${{ secrets.SPLIT_APP_PRIVATE_KEY }}
           owner: VantaFinance
           repositories: dump-meminfo
