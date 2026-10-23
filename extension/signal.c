@@ -339,6 +339,41 @@ static int meminfo_set_memory_limit(size_t limit)
 }
 
 /**
+ * Hand the written dump over by renaming it into place — or, when writing it
+ * failed or it is incomplete, report that and remove it.
+ */
+static void meminfo_dump_file_finish(const char *request, const char *temp_path, const char *final_path, int write_errno, int status)
+{
+    char message[MAXPATHLEN + 192];
+    int saved_errno;
+
+    if (write_errno != 0) {
+        snprintf(message, sizeof(message), "meminfo: dump to %s failed: %s",
+            temp_path, strerror(write_errno));
+        meminfo_report_dump_failure(request, message);
+        unlink(temp_path);
+        return;
+    }
+
+    if (status == MEMINFO_DUMP_INCOMPLETE) {
+        // Valid JSON, but with items missing: not handed over as a dump.
+        snprintf(message, sizeof(message),
+            "meminfo: dump to %s is incomplete: out of memory for its bookkeeping", temp_path);
+        meminfo_report_dump_failure(request, message);
+        unlink(temp_path);
+        return;
+    }
+
+    if (rename(temp_path, final_path) != 0) {
+        saved_errno = errno;
+        snprintf(message, sizeof(message), "meminfo: cannot rename %s: %s",
+            temp_path, strerror(saved_errno));
+        meminfo_report_dump_failure(request, message);
+        unlink(temp_path);
+    }
+}
+
+/**
  * Write the dump to a file, at a safe point in the VM.
  *
  * Nothing here may reach the output of the process being dumped: a stream
@@ -485,24 +520,7 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id)
                 write_errno = errno ? errno : EIO;
             }
 
-            if (write_errno != 0) {
-                snprintf(message, sizeof(message), "meminfo: dump to %s failed: %s",
-                    temp_path, strerror(write_errno));
-                meminfo_report_dump_failure(request, message);
-                unlink(temp_path);
-            } else if (status == MEMINFO_DUMP_INCOMPLETE) {
-                // Valid JSON, but with items missing: not handed over as a dump.
-                snprintf(message, sizeof(message),
-                    "meminfo: dump to %s is incomplete: out of memory for its bookkeeping", temp_path);
-                meminfo_report_dump_failure(request, message);
-                unlink(temp_path);
-            } else if (rename(temp_path, final_path) != 0) {
-                saved_errno = errno;
-                snprintf(message, sizeof(message), "meminfo: cannot rename %s: %s",
-                    temp_path, strerror(saved_errno));
-                meminfo_report_dump_failure(request, message);
-                unlink(temp_path);
-            }
+            meminfo_dump_file_finish(request, temp_path, final_path, write_errno, status);
         }
     }
 
@@ -571,6 +589,7 @@ static void meminfo_interrupt_handler(zend_execute_data *execute_data)
 MEMINFO_HIDDEN void meminfo_install_signal_handler(void)
 {
     struct sigaction action;
+    char message[160];
 
     if (MEMINFO_G(dump_signal) == 0
         || MEMINFO_G(handler_installed)
@@ -585,17 +604,16 @@ MEMINFO_HIDDEN void meminfo_install_signal_handler(void)
 
     if (sigaction(MEMINFO_G(dump_signal), &action, &MEMINFO_G(previous_action)) == 0) {
         MEMINFO_G(handler_installed) = 1;
-    } else {
-        char message[160];
-
-        // Once only: this would otherwise be logged on every request.
-        MEMINFO_G(install_failed) = 1;
-
-        snprintf(message, sizeof(message),
-            "meminfo: cannot handle signal %d: %s; signal dumps are disabled",
-            MEMINFO_G(dump_signal), strerror(errno));
-        php_log_err(message);
+        return;
     }
+
+    // Once only: this would otherwise be logged on every request.
+    MEMINFO_G(install_failed) = 1;
+
+    snprintf(message, sizeof(message),
+        "meminfo: cannot handle signal %d: %s; signal dumps are disabled",
+        MEMINFO_G(dump_signal), strerror(errno));
+    php_log_err(message);
 }
 
 MEMINFO_HIDDEN void meminfo_restore_signal_handler(void)

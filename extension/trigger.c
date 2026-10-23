@@ -138,13 +138,15 @@ static int meminfo_parse_pid_dump_name(const char *name, pid_t pid, long *sec, l
 
     if (strcmp(end, ".json") == 0) {
         *is_temp = 0;
-    } else if (strcmp(end, ".json.tmp") == 0) {
-        *is_temp = 1;
-    } else {
-        return 0;
+        return 1;
     }
 
-    return 1;
+    if (strcmp(end, ".json.tmp") == 0) {
+        *is_temp = 1;
+        return 1;
+    }
+
+    return 0;
 }
 
 /**
@@ -345,154 +347,153 @@ static int meminfo_read_dump_failure(const char *error_path, pid_t pid, char *re
 }
 
 /**
- * Ask a running process to dump its memory, and wait for the result.
- *
- * The target does the work at the next safe point between opcodes, so this
- * returns as soon as the dump file has been completely written and renamed
- * into place — or throws, explaining which step failed.
+ * One meminfo_dump_process() call: what was asked for, where the dump will
+ * appear and what has to be cleaned up afterwards. Shared by its steps.
  */
-PHP_FUNCTION(meminfo_dump_process)
-{
-    zend_long pid_arg;
-    zval *options = NULL;
-
+typedef struct {
     pid_t pid;
     int signal_number;
     int dump_id;
-    zend_long timeout_seconds = 30;
-    int force = 0;
+    zend_long timeout_seconds;
+    int force;
     const char *dir;
     char dir_buffer[MAXPATHLEN];
     char resolved_dir[MAXPATHLEN];
-    int explicit_dir = 0;
-    char proc_root_prefix[64];
+    int explicit_dir;
     char request_path[MAXPATHLEN];
     char request_error_path[MAXPATHLEN + 8];
-    int request_created = 0;
+    int request_created;
 
     meminfo_dump_location locations[2];
-    int location_count = 1;
-    int i;
+    int location_count;
 
-    int caught;
-    unsigned long long start_time = 0;
+    unsigned long long start_time;
     int have_start_time;
-    uint64_t began;
-    uint64_t last_resend;
-    uint64_t last_growth;
-    uint64_t poll_interval;
-    off_t last_size = -1;
-    int temp_seen = 0;
 #ifndef HAVE_SIGQUEUE
     struct timeval sent_at;
-    int untrusted = 0;
-    int resends = 0;
 #endif
+} meminfo_dump_request;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "l|a", &pid_arg, &options) == FAILURE) {
-        return;
+/**
+ * How a step of meminfo_dump_process() ended.
+ */
+typedef enum {
+    MEMINFO_STEP_CONTINUE,          /* go on with the next step */
+    MEMINFO_STEP_DONE,              /* stop: the dump was found, or an exception is pending */
+    MEMINFO_STEP_REMOVE_PARTIAL     /* stop with an exception; the partial dump is of no use */
+} meminfo_step;
+
+/* --- options ----------------------------------------------------------- */
+
+/**
+ * Read the "dir", "signal", "timeout" and "force" options over the ini
+ * defaults. Throws InvalidArgumentException on a value that cannot be used.
+ */
+static meminfo_step meminfo_dump_process_options(meminfo_dump_request *request, HashTable *option_table)
+{
+    zval *option;
+
+    option = zend_hash_str_find(option_table, "dir", sizeof("dir") - 1);
+    if (option != NULL && Z_TYPE_P(option) == IS_STRING && Z_STRLEN_P(option) > 0) {
+        if (Z_STRLEN_P(option) >= sizeof(request->dir_buffer)) {
+            zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0,
+                "meminfo_dump_process(): dir is too long");
+            return MEMINFO_STEP_DONE;
+        }
+        memcpy(request->dir_buffer, Z_STRVAL_P(option), Z_STRLEN_P(option) + 1);
+        request->dir = request->dir_buffer;
+        request->explicit_dir = 1;
     }
 
-    /* --- options ------------------------------------------------------- */
-
-    signal_number = MEMINFO_G(dump_signal);
-#if !MEMINFO_HAVE_SIGNAL_DUMP
-    // This build cannot serve a dump, so the ini value was forced to 0; the
-    // default signal is still the right thing to send to a target that can.
-    if (signal_number == 0) {
-        meminfo_parse_signal(MEMINFO_DEFAULT_DUMP_SIGNAL, &signal_number);
+    option = zend_hash_str_find(option_table, "signal", sizeof("signal") - 1);
+    if (option != NULL && Z_TYPE_P(option) != IS_STRING) {
+        request->signal_number = (int) zval_get_long(option);
     }
-#endif
+    if (option != NULL && Z_TYPE_P(option) == IS_STRING) {
+        int parsed = 0;
 
-    dir = meminfo_dump_directory();
-
-    if (options != NULL) {
-        zval *option;
-        HashTable *option_table = Z_ARRVAL_P(options);
-
-        option = zend_hash_str_find(option_table, "dir", sizeof("dir") - 1);
-        if (option != NULL && Z_TYPE_P(option) == IS_STRING && Z_STRLEN_P(option) > 0) {
-            if (Z_STRLEN_P(option) >= sizeof(dir_buffer)) {
-                zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0,
-                    "meminfo_dump_process(): dir is too long");
-                return;
-            }
-            memcpy(dir_buffer, Z_STRVAL_P(option), Z_STRLEN_P(option) + 1);
-            dir = dir_buffer;
-            explicit_dir = 1;
+        if (!meminfo_parse_signal(Z_STRVAL_P(option), &parsed)) {
+            zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0,
+                "meminfo_dump_process(): unknown signal \"%s\"", Z_STRVAL_P(option));
+            return MEMINFO_STEP_DONE;
         }
-
-        option = zend_hash_str_find(option_table, "signal", sizeof("signal") - 1);
-        if (option != NULL) {
-            int parsed = 0;
-
-            if (Z_TYPE_P(option) == IS_STRING) {
-                if (!meminfo_parse_signal(Z_STRVAL_P(option), &parsed)) {
-                    zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0,
-                        "meminfo_dump_process(): unknown signal \"%s\"", Z_STRVAL_P(option));
-                    return;
-                }
-            } else {
-                parsed = (int) zval_get_long(option);
-            }
-
-            signal_number = parsed;
-        }
-
-        option = zend_hash_str_find(option_table, "timeout", sizeof("timeout") - 1);
-        if (option != NULL) {
-            timeout_seconds = zval_get_long(option);
-        }
-
-        option = zend_hash_str_find(option_table, "force", sizeof("force") - 1);
-        if (option != NULL) {
-            force = zend_is_true(option);
-        }
+        request->signal_number = parsed;
     }
+
+    option = zend_hash_str_find(option_table, "timeout", sizeof("timeout") - 1);
+    if (option != NULL) {
+        request->timeout_seconds = zval_get_long(option);
+    }
+
+    option = zend_hash_str_find(option_table, "force", sizeof("force") - 1);
+    if (option != NULL) {
+        request->force = zend_is_true(option);
+    }
+
+    return MEMINFO_STEP_CONTINUE;
+}
+
+/**
+ * Check the pid, the directory and the signal. Throws InvalidArgumentException.
+ */
+static meminfo_step meminfo_dump_process_validate(meminfo_dump_request *request, zend_long pid_arg)
+{
+    struct stat info;
 
     if (pid_arg <= 0) {
         zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0,
             "meminfo_dump_process(): pid must be greater than 0");
-        return;
+        return MEMINFO_STEP_DONE;
     }
 
-    pid = (pid_t) pid_arg;
+    request->pid = (pid_t) pid_arg;
 
-    if (pid == getpid()) {
+    if (request->pid == getpid()) {
         zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0,
             "meminfo_dump_process(): cannot dump the calling process; use meminfo_dump()");
-        return;
+        return MEMINFO_STEP_DONE;
     }
 
-    if (explicit_dir) {
-        struct stat info;
-
-        // Sent to the target as an absolute path: its working directory is
-        // not ours.
-        if (realpath(dir_buffer, resolved_dir) == NULL
-            || stat(resolved_dir, &info) != 0 || !S_ISDIR(info.st_mode)) {
+    // Sent to the target as an absolute path: its working directory is not ours.
+    if (request->explicit_dir) {
+        if (realpath(request->dir_buffer, request->resolved_dir) == NULL
+            || stat(request->resolved_dir, &info) != 0 || !S_ISDIR(info.st_mode)) {
             zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0,
-                "meminfo_dump_process(): dir %s is not an existing directory", dir_buffer);
-            return;
+                "meminfo_dump_process(): dir %s is not an existing directory", request->dir_buffer);
+            return MEMINFO_STEP_DONE;
         }
 
-        dir = resolved_dir;
+        request->dir = request->resolved_dir;
     }
 
-    if (signal_number <= 0) {
+    if (request->signal_number <= 0) {
         zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0,
             "meminfo_dump_process(): no dump signal configured; set meminfo.dump_signal "
             "or pass the \"signal\" option");
-        return;
+        return MEMINFO_STEP_DONE;
     }
 
-    if (timeout_seconds < 1) {
-        timeout_seconds = 1;
+    if (request->timeout_seconds < 1) {
+        request->timeout_seconds = 1;
     }
 
-    /* --- is the target listening? -------------------------------------- */
+    return MEMINFO_STEP_CONTINUE;
+}
 
-    caught = meminfo_signal_is_caught(pid, signal_number);
+/* --- is the target listening? ------------------------------------------ */
+
+/**
+ * Refuse to signal a target that cannot serve the dump, or whose dump could
+ * not be trusted. Throws RuntimeException.
+ */
+static meminfo_step meminfo_dump_process_check_target(meminfo_dump_request *request)
+{
+    pid_t pid = request->pid;
+    int signal_number = request->signal_number;
+    int caught = meminfo_signal_is_caught(pid, signal_number);
+    int default_signal = 0;
+    uid_t real_uid;
+    uid_t effective_uid;
 
     if (caught == 0 && !meminfo_signal_is_harmless(signal_number)) {
         // Deliberately not overridable by "force". The target is known not to
@@ -505,336 +506,504 @@ PHP_FUNCTION(meminfo_dump_process)
             "action would terminate or stop it; refusing to send it. The target may not have "
             "meminfo loaded, may be a PHP 7.0 or ZTS build, or may not be running a request",
             (int) pid, signal_number);
-        return;
+        return MEMINFO_STEP_DONE;
     }
 
-    if (caught == 0 && !force) {
+    if (caught == 0 && !request->force) {
         zend_throw_exception_ex(spl_ce_RuntimeException, 0,
             "meminfo_dump_process(): process %d does not handle signal %d: meminfo is not "
             "loaded, the target is PHP 7.0 or a ZTS build, or no request is running. "
             "Pass \"force\" => true to send it anyway",
             (int) pid, signal_number);
-        return;
+        return MEMINFO_STEP_DONE;
     }
 
-    if (caught < 0 && !force) {
-        int default_signal = 0;
+    meminfo_parse_signal(MEMINFO_DEFAULT_DUMP_SIGNAL, &default_signal);
 
-        meminfo_parse_signal(MEMINFO_DEFAULT_DUMP_SIGNAL, &default_signal);
-
-        // Without /proc there is no way to know whether the signal is handled.
-        // Sending the default is safe because its default action is to ignore;
-        // anything else could kill a target that is not listening.
-        if (signal_number != default_signal) {
-            zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                "meminfo_dump_process(): cannot tell whether process %d handles signal %d "
-                "(no /proc on this system) and its default action may terminate the target. "
-                "Pass \"force\" => true to send it anyway",
-                (int) pid, signal_number);
-            return;
-        }
+    // Without /proc there is no way to know whether the signal is handled.
+    // Sending the default is safe because its default action is to ignore;
+    // anything else could kill a target that is not listening.
+    if (caught < 0 && !request->force && signal_number != default_signal) {
+        zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+            "meminfo_dump_process(): cannot tell whether process %d handles signal %d "
+            "(no /proc on this system) and its default action may terminate the target. "
+            "Pass \"force\" => true to send it anyway",
+            (int) pid, signal_number);
+        return MEMINFO_STEP_DONE;
     }
 
     // As root, a dump would pass the ownership check whoever wrote it, so
     // without knowing who runs the target there is no dump that can be trusted.
     // Better to say so now than after the target has spent the time writing one.
-    if (geteuid() == 0) {
-        uid_t real_uid;
-        uid_t effective_uid;
-
-        if (!meminfo_process_uids(pid, &real_uid, &effective_uid)) {
-            zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                "meminfo_dump_process(): cannot determine who runs process %d, so a dump could "
-                "not be verified as coming from it; refusing to ask as root", (int) pid);
-            return;
-        }
+    if (geteuid() == 0 && !meminfo_process_uids(pid, &real_uid, &effective_uid)) {
+        zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+            "meminfo_dump_process(): cannot determine who runs process %d, so a dump could "
+            "not be verified as coming from it; refusing to ask as root", (int) pid);
+        return MEMINFO_STEP_DONE;
     }
 
-    have_start_time = meminfo_process_start_time(pid, &start_time);
+    request->have_start_time = meminfo_process_start_time(pid, &request->start_time);
 
-    /* --- where the dump will appear ------------------------------------ */
+    return MEMINFO_STEP_CONTINUE;
+}
+
+/* --- where the dump will appear ---------------------------------------- */
+
+/**
+ * Work out where the dump will appear and, for an explicit directory, leave
+ * the request file that tells the target to write there.
+ */
+static meminfo_step meminfo_dump_process_locations(meminfo_dump_request *request)
+{
+    char proc_root_prefix[64];
 
 #ifdef HAVE_SIGQUEUE
-    dump_id = meminfo_random_dump_id();
+    request->dump_id = meminfo_random_dump_id();
 #else
     // Cannot be delivered; the dump is looked for by pid and time instead.
-    dump_id = 0;
+    request->dump_id = 0;
 #endif
 
-    meminfo_dump_location_init(&locations[0], "", dir, dump_id);
+    meminfo_dump_location_init(&request->locations[0], "", request->dir, request->dump_id);
 
 #ifdef __linux__
-    if (snprintf(proc_root_prefix, sizeof(proc_root_prefix), "/proc/%d/root", (int) pid) > 0) {
-        meminfo_dump_location_init(&locations[1], proc_root_prefix, dir, dump_id);
-        if (locations[1].usable) {
-            location_count = 2;
+    if (snprintf(proc_root_prefix, sizeof(proc_root_prefix), "/proc/%d/root", (int) request->pid) > 0) {
+        meminfo_dump_location_init(&request->locations[1], proc_root_prefix, request->dir, request->dump_id);
+        if (request->locations[1].usable) {
+            request->location_count = 2;
         }
     }
 #else
     (void) proc_root_prefix;
 #endif
 
-    if (!locations[0].usable) {
+    if (!request->locations[0].usable) {
         zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0,
             "meminfo_dump_process(): dump path is too long");
-        return;
+        return MEMINFO_STEP_DONE;
     }
 
     // Without a request the target writes to its own meminfo.dump_dir, which
     // may well not be the directory asked for here.
-    if (explicit_dir) {
-        if (!meminfo_create_dump_request(pid, dump_id, dir, timeout_seconds, request_path, sizeof(request_path))) {
-            return;
-        }
-
-        request_created = 1;
-        snprintf(request_error_path, sizeof(request_error_path), "%s.error", request_path);
+    if (!request->explicit_dir) {
+        return MEMINFO_STEP_CONTINUE;
     }
 
-    /* --- ask ----------------------------------------------------------- */
+    if (!meminfo_create_dump_request(request->pid, request->dump_id, request->dir, request->timeout_seconds,
+            request->request_path, sizeof(request->request_path))) {
+        return MEMINFO_STEP_DONE;
+    }
 
+    request->request_created = 1;
+    snprintf(request->request_error_path, sizeof(request->request_error_path), "%s.error", request->request_path);
+
+    return MEMINFO_STEP_CONTINUE;
+}
+
+/* --- ask --------------------------------------------------------------- */
+
+/**
+ * Send the dump signal: with the request id where sigqueue() can carry one,
+ * plainly otherwise. Throws RuntimeException when it cannot be sent.
+ */
+static meminfo_step meminfo_dump_process_ask(meminfo_dump_request *request)
+{
 #ifdef HAVE_SIGQUEUE
-    {
-        union sigval value;
+    union sigval value;
 
-        memset(&value, 0, sizeof(value));
-        value.sival_int = dump_id;
+    memset(&value, 0, sizeof(value));
+    value.sival_int = request->dump_id;
 
-        if (sigqueue(pid, signal_number, value) != 0) {
-            zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                "meminfo_dump_process(): cannot signal process %d: %s",
-                (int) pid, strerror(errno));
-            goto done;
-        }
+    if (sigqueue(request->pid, request->signal_number, value) == 0) {
+        return MEMINFO_STEP_CONTINUE;
     }
 #else
     // Without sigqueue() the id cannot be delivered, so the target names the
     // dump after its pid and the time the dump started. Only a dump started
     // after this moment can answer this request. Two requests running at the
     // same time cannot be told apart and may be handed the same file.
-    gettimeofday(&sent_at, NULL);
+    gettimeofday(&request->sent_at, NULL);
 
-    if (kill(pid, signal_number) != 0) {
-        zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-            "meminfo_dump_process(): cannot signal process %d: %s",
-            (int) pid, strerror(errno));
-        goto done;
+    if (kill(request->pid, request->signal_number) == 0) {
+        return MEMINFO_STEP_CONTINUE;
     }
 #endif
 
-    /* --- wait ---------------------------------------------------------- */
+    zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+        "meminfo_dump_process(): cannot signal process %d: %s",
+        (int) request->pid, strerror(errno));
+    return MEMINFO_STEP_DONE;
+}
 
-    began = meminfo_now_usec();
-    last_resend = began;
-    last_growth = began;
-    poll_interval = MEMINFO_POLL_MIN_INTERVAL_USEC;
+/* --- wait -------------------------------------------------------------- */
+
+/**
+ * The location holding the finished dump, under either name, or -1.
+ */
+static int meminfo_dump_process_find_finished(const meminfo_dump_request *request)
+{
+    struct stat info;
+    int i;
+
+    for (i = 0; i < request->location_count; i++) {
+        const meminfo_dump_location *location = &request->locations[i];
+
+        if (location->usable
+            && location->final_path[0] != '\0'
+            && stat(location->final_path, &info) == 0
+            && S_ISREG(info.st_mode)) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+/**
+ * The size of the partial dump, or -1 while there is none.
+ */
+static off_t meminfo_dump_process_partial_size(const meminfo_dump_request *request)
+{
+    struct stat info;
+    int i;
+
+    for (i = 0; i < request->location_count; i++) {
+        const meminfo_dump_location *location = &request->locations[i];
+
+        if (location->usable
+            && location->temp_path[0] != '\0'
+            && stat(location->temp_path, &info) == 0) {
+            return info.st_size;
+        }
+    }
+
+    return -1;
+}
+
+/**
+ * Throw for a dump that stopped growing for the whole timeout.
+ */
+static void meminfo_dump_process_throw_stalled(const meminfo_dump_request *request, int untrusted)
+{
+    if (untrusted > 0) {
+        zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+            "meminfo_dump_process(): the dump of process %d stopped growing for %ld "
+            "seconds; giving up (%d matching file(s) in %s were ignored: not owned "
+            "by the target, or not regular files with a single link)",
+            (int) request->pid, (long) request->timeout_seconds, untrusted, request->locations[0].dir);
+        return;
+    }
+
+    zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+        "meminfo_dump_process(): the dump of process %d stopped growing for %ld "
+        "seconds; giving up", (int) request->pid, (long) request->timeout_seconds);
+}
+
+/**
+ * Throw for a dump that did not start within the timeout.
+ *
+ * Two usual reasons. The target ran no PHP code meanwhile: the dump starts at
+ * the next opcode, and an idle event loop (Swoole, ReactPHP, AMPHP) or a long
+ * blocking call never gets there. Or a directory mismatch: the target writes
+ * to its own meminfo.dump_dir, and only builds that know about requests can
+ * be told otherwise.
+ */
+static void meminfo_dump_process_throw_not_started(const meminfo_dump_request *request, int untrusted)
+{
+    const char *hint = request->explicit_dir
+        ? "either it ran no PHP code in that time (an idle event loop or a long blocking call: "
+          "retry while it is busy), or it runs an older meminfo that cannot be told where to "
+          "write: look in its meminfo.dump_dir"
+        : "either it ran no PHP code in that time (an idle event loop or a long blocking call: "
+          "retry while it is busy), or it wrote to its own meminfo.dump_dir: pass \"dir\" to "
+          "choose where";
+
+    if (untrusted > 0) {
+        zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+            "meminfo_dump_process(): process %d did not start a dump in %s within %ld seconds "
+            "(%d matching file(s) were ignored: not owned by the target, or not "
+            "regular files with a single link)",
+            (int) request->pid, request->locations[0].dir, (long) request->timeout_seconds, untrusted);
+        return;
+    }
+
+    zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+        "meminfo_dump_process(): process %d did not start a dump in %s within %ld seconds; %s",
+        (int) request->pid, request->locations[0].dir, (long) request->timeout_seconds, hint);
+}
+
+/**
+ * Has the target gone away? Throws RuntimeException when it exited, or when
+ * its pid now belongs to another process.
+ */
+static meminfo_step meminfo_dump_process_target_gone(const meminfo_dump_request *request)
+{
+    unsigned long long current_start_time = 0;
+
+    if (kill(request->pid, 0) != 0 && errno == ESRCH) {
+        zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+            "meminfo_dump_process(): process %d exited during the dump", (int) request->pid);
+        return MEMINFO_STEP_REMOVE_PARTIAL;
+    }
+
+    if (request->have_start_time
+        && meminfo_process_start_time(request->pid, &current_start_time)
+        && current_start_time != request->start_time) {
+
+        zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+            "meminfo_dump_process(): process %d exited during the dump and its pid "
+            "was reused", (int) request->pid);
+        return MEMINFO_STEP_REMOVE_PARTIAL;
+    }
+
+    return MEMINFO_STEP_CONTINUE;
+}
+
+/**
+ * Send the signal again.
+ *
+ * Standard signals coalesce, so one sent while the target was busy may be the
+ * only one it ever sees, and one arriving between two requests is lost. With
+ * an id, resending is harmless: the file name stays the same and the target
+ * serves it once.
+ */
+static void meminfo_dump_process_resend(meminfo_dump_request *request, int *resends)
+{
+#ifdef HAVE_SIGQUEUE
+    union sigval value;
+
+    (void) resends;
+    memset(&value, 0, sizeof(value));
+    value.sival_int = request->dump_id;
+    sigqueue(request->pid, request->signal_number, value);
+#else
+    // Without one, every signal served is a separate dump: look once more
+    // right before asking again, as the dump may have started since the last
+    // look, and ask only a few times. A target that writes somewhere this call
+    // cannot see would otherwise get a full dump out of every resend.
+    int pending = 0;
+    int i;
+
+    for (i = 0; i < request->location_count; i++) {
+        if (request->locations[i].usable) {
+            meminfo_find_pid_dump(&request->locations[i], request->pid, &request->sent_at);
+            pending |= request->locations[i].temp_path[0] != '\0' || request->locations[i].final_path[0] != '\0';
+        }
+    }
+
+    if (!pending && *resends < MEMINFO_MAX_RESENDS_WITHOUT_ID) {
+        kill(request->pid, request->signal_number);
+        (*resends)++;
+    }
+#endif
+}
+
+/**
+ * Poll until the dump is complete, the target fails or goes away, or the
+ * timeout runs out. Returns MEMINFO_STEP_DONE with *finished set to the
+ * location of the dump on success.
+ */
+static meminfo_step meminfo_dump_process_wait(meminfo_dump_request *request, int *finished)
+{
+    uint64_t began = meminfo_now_usec();
+    uint64_t last_resend = began;
+    uint64_t last_growth = began;
+    uint64_t poll_interval = MEMINFO_POLL_MIN_INTERVAL_USEC;
+    uint64_t timeout_usec = (uint64_t) request->timeout_seconds * 1000000ULL;
+    off_t last_size = -1;
+    off_t size;
+    int temp_seen = 0;
+    int untrusted = 0;
+    int resends = 0;
+    char reason[512];
+    meminfo_step step;
+    int found;
+#ifndef HAVE_SIGQUEUE
+    int i;
+#endif
 
     for (;;) {
-        struct stat info;
-        int finished = -1;
-
-        if (request_created) {
-            char reason[512];
-
-            if (meminfo_read_dump_failure(request_error_path, pid, reason, sizeof(reason))) {
-                zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                    "meminfo_dump_process(): process %d could not write the dump: %s",
-                    (int) pid, reason[0] != '\0' ? reason : "no reason given");
-                goto done;
-            }
+        if (request->request_created
+            && meminfo_read_dump_failure(request->request_error_path, request->pid, reason, sizeof(reason))) {
+            zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+                "meminfo_dump_process(): process %d could not write the dump: %s",
+                (int) request->pid, reason[0] != '\0' ? reason : "no reason given");
+            return MEMINFO_STEP_DONE;
         }
 
 #ifndef HAVE_SIGQUEUE
         untrusted = 0;
-        for (i = 0; i < location_count; i++) {
-            if (locations[i].usable) {
-                untrusted += meminfo_find_pid_dump(&locations[i], pid, &sent_at);
+        for (i = 0; i < request->location_count; i++) {
+            if (request->locations[i].usable) {
+                untrusted += meminfo_find_pid_dump(&request->locations[i], request->pid, &request->sent_at);
             }
         }
 #endif
 
-        for (i = 0; i < location_count; i++) {
-            if (locations[i].usable
-                && locations[i].temp_path[0] != '\0'
-                && stat(locations[i].temp_path, &info) == 0) {
-
-                // A partial dump means the target is working; from here on the
-                // wait is bounded by progress rather than by the timeout,
-                // because a large heap on a slow disk can legitimately take
-                // minutes.
-                temp_seen = 1;
-
-                if (info.st_size != last_size) {
-                    last_size = info.st_size;
-                    last_growth = meminfo_now_usec();
-                }
-                break;
-            }
+        // A partial dump means the target is working; from here on the wait
+        // is bounded by progress rather than by the timeout, because a large
+        // heap on a slow disk can legitimately take minutes.
+        size = meminfo_dump_process_partial_size(request);
+        if (size >= 0) {
+            temp_seen = 1;
+        }
+        if (size >= 0 && size != last_size) {
+            last_size = size;
+            last_growth = meminfo_now_usec();
         }
 
-        // The finished dump, under either name. Looked for after the partial
-        // one, never before: the other way round, a rename in between would
-        // make the dump look absent and the request be sent again.
-        for (i = 0; i < location_count && finished < 0; i++) {
-            if (locations[i].usable
-                && locations[i].final_path[0] != '\0'
-                && stat(locations[i].final_path, &info) == 0
-                && S_ISREG(info.st_mode)) {
-                finished = i;
-            }
-        }
-
-        if (finished >= 0) {
-            if (!meminfo_dump_file_is_trustworthy(locations[finished].final_path, pid)) {
-                zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                    "meminfo_dump_process(): %s is not a regular file owned by process %d; "
-                    "refusing to use it",
-                    locations[finished].final_path, (int) pid);
-                goto done;
-            }
-
-            RETVAL_STRING(locations[finished].final_path);
-            goto done;
-        }
-
-        if (temp_seen) {
-            if (meminfo_now_usec() - last_growth > (uint64_t) timeout_seconds * 1000000ULL) {
-#ifndef HAVE_SIGQUEUE
-                if (untrusted > 0) {
-                    zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                        "meminfo_dump_process(): the dump of process %d stopped growing for %ld "
-                        "seconds; giving up (%d matching file(s) in %s were ignored: not owned "
-                        "by the target, or not regular files with a single link)",
-                        (int) pid, (long) timeout_seconds, untrusted, locations[0].dir);
-                    goto done;
-                }
-#endif
-                zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                    "meminfo_dump_process(): the dump of process %d stopped growing for %ld "
-                    "seconds; giving up", (int) pid, (long) timeout_seconds);
-                goto done;
-            }
-        } else if (meminfo_now_usec() - began > (uint64_t) timeout_seconds * 1000000ULL) {
-            // Two usual reasons. The target ran no PHP code meanwhile: the dump
-            // starts at the next opcode, and an idle event loop (Swoole,
-            // ReactPHP, AMPHP) or a long blocking call never gets there. Or a
-            // directory mismatch: the target writes to its own
-            // meminfo.dump_dir, and only builds that know about requests can be
-            // told otherwise.
-            const char *hint = explicit_dir
-                ? "either it ran no PHP code in that time (an idle event loop or a long blocking call: "
-                  "retry while it is busy), or it runs an older meminfo that cannot be told where to "
-                  "write: look in its meminfo.dump_dir"
-                : "either it ran no PHP code in that time (an idle event loop or a long blocking call: "
-                  "retry while it is busy), or it wrote to its own meminfo.dump_dir: pass \"dir\" to "
-                  "choose where";
-
-#ifndef HAVE_SIGQUEUE
-            if (untrusted > 0) {
-                zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                    "meminfo_dump_process(): process %d did not start a dump in %s within %ld seconds "
-                    "(%d matching file(s) were ignored: not owned by the target, or not "
-                    "regular files with a single link)",
-                    (int) pid, locations[0].dir, (long) timeout_seconds, untrusted);
-                goto done;
-            }
-#endif
+        // Looked for after the partial one, never before: the other way
+        // round, a rename in between would make the dump look absent and the
+        // request be sent again.
+        found = meminfo_dump_process_find_finished(request);
+        if (found >= 0 && !meminfo_dump_file_is_trustworthy(request->locations[found].final_path, request->pid)) {
             zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                "meminfo_dump_process(): process %d did not start a dump in %s within %ld seconds; %s",
-                (int) pid, locations[0].dir, (long) timeout_seconds, hint);
-            goto done;
+                "meminfo_dump_process(): %s is not a regular file owned by process %d; "
+                "refusing to use it",
+                request->locations[found].final_path, (int) request->pid);
+            return MEMINFO_STEP_DONE;
+        }
+        if (found >= 0) {
+            *finished = found;
+            return MEMINFO_STEP_DONE;
         }
 
-        /* --- has the target gone away? --- */
+        if (temp_seen && meminfo_now_usec() - last_growth > timeout_usec) {
+            meminfo_dump_process_throw_stalled(request, untrusted);
+            return MEMINFO_STEP_DONE;
+        }
 
-        if (kill(pid, 0) != 0 && errno == ESRCH) {
+        if (!temp_seen && meminfo_now_usec() - began > timeout_usec) {
+            meminfo_dump_process_throw_not_started(request, untrusted);
+            return MEMINFO_STEP_DONE;
+        }
+
+        step = meminfo_dump_process_target_gone(request);
+        if (step != MEMINFO_STEP_CONTINUE) {
+            return step;
+        }
+
+        // The handler is only installed while a request runs. If it has gone
+        // and nothing was written, the request finished before reaching a
+        // safe point.
+        if (!temp_seen && meminfo_signal_is_caught(request->pid, request->signal_number) == 0) {
             zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                "meminfo_dump_process(): process %d exited during the dump", (int) pid);
-            goto failed_remove_partial;
+                "meminfo_dump_process(): the request in process %d ended before the dump "
+                "started", (int) request->pid);
+            return MEMINFO_STEP_DONE;
         }
 
-        if (have_start_time) {
-            unsigned long long current_start_time = 0;
-
-            if (meminfo_process_start_time(pid, &current_start_time)
-                && current_start_time != start_time) {
-
-                zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                    "meminfo_dump_process(): process %d exited during the dump and its pid "
-                    "was reused", (int) pid);
-                goto failed_remove_partial;
-            }
-        }
-
-        if (!temp_seen) {
-            // The handler is only installed while a request runs. If it has
-            // gone and nothing was written, the request finished before
-            // reaching a safe point.
-            if (meminfo_signal_is_caught(pid, signal_number) == 0) {
-                zend_throw_exception_ex(spl_ce_RuntimeException, 0,
-                    "meminfo_dump_process(): the request in process %d ended before the dump "
-                    "started", (int) pid);
-                goto done;
-            }
-
-            // Standard signals coalesce, so one sent while the target was busy
-            // may be the only one it ever sees, and one arriving between two
-            // requests is lost. With an id, resending is harmless: the file
-            // name stays the same and the target serves it once.
-            if (meminfo_now_usec() - last_resend >= MEMINFO_RESEND_INTERVAL_USEC) {
-#ifdef HAVE_SIGQUEUE
-                union sigval value;
-
-                memset(&value, 0, sizeof(value));
-                value.sival_int = dump_id;
-                sigqueue(pid, signal_number, value);
-#else
-                // Without one, every signal served is a separate dump: look once
-                // more right before asking again, as the dump may have started
-                // since the last look, and ask only a few times. A target that
-                // writes somewhere this call cannot see would otherwise get a
-                // full dump out of every resend.
-                int pending = 0;
-
-                for (i = 0; i < location_count; i++) {
-                    if (locations[i].usable) {
-                        meminfo_find_pid_dump(&locations[i], pid, &sent_at);
-                        pending |= locations[i].temp_path[0] != '\0' || locations[i].final_path[0] != '\0';
-                    }
-                }
-
-                if (!pending && resends < MEMINFO_MAX_RESENDS_WITHOUT_ID) {
-                    kill(pid, signal_number);
-                    resends++;
-                }
-#endif
-                last_resend = meminfo_now_usec();
-            }
+        if (!temp_seen && meminfo_now_usec() - last_resend >= MEMINFO_RESEND_INTERVAL_USEC) {
+            meminfo_dump_process_resend(request, &resends);
+            last_resend = meminfo_now_usec();
         }
 
         meminfo_sleep_usec(poll_interval);
-        if (poll_interval < MEMINFO_POLL_INTERVAL_USEC) {
-            poll_interval *= 2;
-            if (poll_interval > MEMINFO_POLL_INTERVAL_USEC) {
-                poll_interval = MEMINFO_POLL_INTERVAL_USEC;
-            }
+        poll_interval *= 2;
+        if (poll_interval > MEMINFO_POLL_INTERVAL_USEC) {
+            poll_interval = MEMINFO_POLL_INTERVAL_USEC;
+        }
+    }
+}
+
+/**
+ * Remove the partial dump the target left behind. Called with an exception
+ * already pending: it is of no use to anyone and goes before unwinding.
+ */
+static void meminfo_dump_process_remove_partial(const meminfo_dump_request *request)
+{
+    int i;
+
+    for (i = 0; i < request->location_count; i++) {
+        if (request->locations[i].usable && request->locations[i].temp_path[0] != '\0') {
+            unlink(request->locations[i].temp_path);
+        }
+    }
+}
+
+/**
+ * Run the steps in order, stopping at the first that does not continue.
+ */
+static meminfo_step meminfo_dump_process_run(meminfo_dump_request *request, zend_long pid_arg, zval *options, int *finished)
+{
+    meminfo_step step;
+
+    if (options != NULL) {
+        step = meminfo_dump_process_options(request, Z_ARRVAL_P(options));
+        if (step != MEMINFO_STEP_CONTINUE) {
+            return step;
         }
     }
 
-failed_remove_partial:
-    // Reached with an exception already pending; the partial dump the target
-    // left behind is of no use to anyone and is removed before unwinding.
-    for (i = 0; i < location_count; i++) {
-        if (locations[i].usable && locations[i].temp_path[0] != '\0') {
-            unlink(locations[i].temp_path);
-        }
+    step = meminfo_dump_process_validate(request, pid_arg);
+    if (step != MEMINFO_STEP_CONTINUE) {
+        return step;
     }
 
-done:
+    step = meminfo_dump_process_check_target(request);
+    if (step != MEMINFO_STEP_CONTINUE) {
+        return step;
+    }
+
+    step = meminfo_dump_process_locations(request);
+    if (step != MEMINFO_STEP_CONTINUE) {
+        return step;
+    }
+
+    step = meminfo_dump_process_ask(request);
+    if (step != MEMINFO_STEP_CONTINUE) {
+        return step;
+    }
+
+    return meminfo_dump_process_wait(request, finished);
+}
+
+/**
+ * Ask a running process to dump its memory, and wait for the result.
+ *
+ * The target does the work at the next safe point between opcodes, so this
+ * returns as soon as the dump file has been completely written and renamed
+ * into place — or throws, explaining which step failed.
+ */
+PHP_FUNCTION(meminfo_dump_process)
+{
+    zend_long pid_arg;
+    zval *options = NULL;
+    meminfo_dump_request request;
+    meminfo_step step;
+    int finished = -1;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "l|a", &pid_arg, &options) == FAILURE) {
+        return;
+    }
+
+    memset(&request, 0, sizeof(request));
+    request.timeout_seconds = 30;
+    request.location_count = 1;
+    request.signal_number = MEMINFO_G(dump_signal);
+#if !MEMINFO_HAVE_SIGNAL_DUMP
+    // This build cannot serve a dump, so the ini value was forced to 0; the
+    // default signal is still the right thing to send to a target that can.
+    if (request.signal_number == 0) {
+        meminfo_parse_signal(MEMINFO_DEFAULT_DUMP_SIGNAL, &request.signal_number);
+    }
+#endif
+    request.dir = meminfo_dump_directory();
+
+    step = meminfo_dump_process_run(&request, pid_arg, options, &finished);
+
+    if (finished >= 0) {
+        RETVAL_STRING(request.locations[finished].final_path);
+    }
+
+    if (step == MEMINFO_STEP_REMOVE_PARTIAL) {
+        meminfo_dump_process_remove_partial(&request);
+    }
+
     // Ours to remove whatever happened; the target only reads it.
-    if (request_created) {
-        unlink(request_path);
-        unlink(request_error_path);
+    if (request.request_created) {
+        unlink(request.request_path);
+        unlink(request.request_error_path);
     }
 }
 

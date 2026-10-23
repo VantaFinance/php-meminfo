@@ -308,6 +308,41 @@ static void meminfo_dump_target_open(meminfo_writer *w, php_stream *stream, FILE
     w->stream = stream;
 }
 
+#ifndef PHP_WIN32
+/**
+ * Copy the spooled dump into the caller's stream. The staging buffer is free
+ * again once the walk is over, so the copy goes through it.
+ */
+static void meminfo_dump_spool_copy(meminfo_writer *w, php_stream *stream, int fd)
+{
+    ssize_t got;
+
+    if (w->err) {
+        return;
+    }
+
+    if (lseek(fd, 0, SEEK_SET) != 0) {
+        w->err = errno ? errno : EIO;
+        return;
+    }
+
+    while ((got = read(fd, w->buf, sizeof(w->buf))) != 0) {
+        if (got < 0 && errno == EINTR) {
+            continue;
+        }
+        if (got < 0) {
+            w->err = errno ? errno : EIO;
+            return;
+        }
+        errno = 0;
+        if ((ssize_t) php_stream_write(stream, w->buf, (size_t) got) != got) {
+            w->err = errno ? errno : EIO;
+            return;
+        }
+    }
+}
+#endif
+
 /**
  * Finish what meminfo_dump_target_open() started, once the walk is over.
  */
@@ -315,30 +350,7 @@ static void meminfo_dump_target_close(meminfo_writer *w, php_stream *stream, FIL
 {
 #ifndef PHP_WIN32
     if (spool != NULL) {
-        int fd = fileno(spool);
-
-        // The staging buffer is free again: reuse it for the copy.
-        if (!w->err && lseek(fd, 0, SEEK_SET) == 0) {
-            ssize_t got;
-
-            while ((got = read(fd, w->buf, sizeof(w->buf))) != 0) {
-                if (got < 0) {
-                    if (errno == EINTR) {
-                        continue;
-                    }
-                    w->err = errno ? errno : EIO;
-                    break;
-                }
-                errno = 0;
-                if ((ssize_t) php_stream_write(stream, w->buf, (size_t) got) != got) {
-                    w->err = errno ? errno : EIO;
-                    break;
-                }
-            }
-        } else if (!w->err) {
-            w->err = errno ? errno : EIO;
-        }
-
+        meminfo_dump_spool_copy(w, stream, fileno(spool));
         fclose(spool);
         return;
     }
@@ -427,7 +439,10 @@ PHP_FUNCTION(meminfo_dump)
         zend_throw_exception_ex(spl_ce_RuntimeException, 0,
             "meminfo_dump(): writing the dump failed (%s); the stream holds a partial dump",
             strerror(write_errno));
-    } else if (status == MEMINFO_DUMP_INCOMPLETE) {
+        return;
+    }
+
+    if (status == MEMINFO_DUMP_INCOMPLETE) {
         zend_throw_exception_ex(spl_ce_RuntimeException, 0,
             "meminfo_dump(): the dump is incomplete: out of memory for its bookkeeping; "
             "the stream holds valid JSON with items missing");

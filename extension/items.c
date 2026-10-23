@@ -64,11 +64,10 @@ static void meminfo_child_entry_open(meminfo_context *ctx, int *first_child)
     meminfo_writer *w = ctx->w;
 
     if (!*first_child) {
-        MEMINFO_WRITE_LIT(w, ",\n");
-    } else {
-        MEMINFO_WRITE_LIT(w, "\n");
-        *first_child = 0;
+        MEMINFO_WRITE_LIT(w, ",");
     }
+    MEMINFO_WRITE_LIT(w, "\n");
+    *first_child = 0;
 
     MEMINFO_WRITE_LIT(w, "            \"");
 }
@@ -95,9 +94,10 @@ static void meminfo_children_close(meminfo_context *ctx, int first_child)
 
     if (first_child) {
         MEMINFO_WRITE_LIT(w, "}");
-    } else {
-        MEMINFO_WRITE_LIT(w, "\n        }");
+        return;
     }
+
+    MEMINFO_WRITE_LIT(w, "\n        }");
 }
 
 static void meminfo_hash_write_entries(meminfo_context *ctx, HashTable *ht, zend_bool is_object, int *first_child);
@@ -470,6 +470,97 @@ static zend_always_inline const meminfo_type_name *meminfo_type_name_of(zval *zv
 }
 
 /**
+ * The object part of an item: its class, handle and one "children" block for
+ * its properties — read from the declared slots when the object has no
+ * property table, from get_properties() otherwise — and what get_gc() exposes.
+ * *level is set up to visit those children; a fiber's suspended frames are
+ * left in level->pending_fiber.
+ */
+static void meminfo_item_write_object(meminfo_context *ctx, zval *zv, meminfo_level *level)
+{
+    meminfo_writer *w = ctx->w;
+    HashTable *properties;
+    zend_string *class_name;
+
+    properties = NULL;
+    class_name = Z_OBJCE_P(zv)->name;
+
+    MEMINFO_WRITE_LIT(w, ",\n        \"class\" : \"");
+    meminfo_write_json_escaped(w, ZSTR_VAL(class_name));
+    MEMINFO_WRITE_LIT(w, "\",\n        \"object_handle\" : \"");
+    meminfo_write_int(w, (int64_t) (int) Z_OBJ_HANDLE_P(zv));
+    MEMINFO_WRITE_LIT(w, "\",\n");
+
+    zend_object *zobj = Z_OBJ_P(zv);
+    int first_child = 1;
+
+    // One block for properties and get_gc() entries alike.
+    MEMINFO_WRITE_LIT(w, "        \"children\" : {");
+
+    if (meminfo_object_has_plain_properties(zobj)) {
+        // Read the declared slots directly: asking the handler would
+        // materialise a property table on the inspected object and leave
+        // it there.
+        meminfo_prop_slot *slots;
+        uint32_t slot_count;
+
+        if (meminfo_collect_declared_properties(zobj, &slots, &slot_count)) {
+            meminfo_slots_write_entries(ctx, slots, slot_count, &first_child);
+
+            level->slots = slots;
+            level->slot_count = slot_count;
+        } else {
+            ctx->aborted = 1;
+        }
+    } else {
+#if PHP_VERSION_ID >= 80000
+        properties = zobj->handlers->get_properties(zobj);
+        if (properties) {
+            GC_TRY_ADDREF(properties);
+        }
+#elif PHP_VERSION_ID >= 70400
+        /* PHP 7.4: get_properties takes a zval and GC_TRY_ADDREF does not exist yet */
+        properties = Z_OBJ_HANDLER_P(zv, get_properties) ? Z_OBJ_HANDLER_P(zv, get_properties)(zv) : NULL;
+        if (properties &&!(GC_FLAGS(properties) & GC_IMMUTABLE)) {
+            GC_ADDREF(properties);
+        }
+#else
+        /* Borrowed reference: get_properties never calls __debugInfo and needs no release */
+        properties = Z_OBJ_HANDLER_P(zv, get_properties) ? Z_OBJPROP_P(zv) : NULL;
+#endif
+
+        if (properties != NULL) {
+            meminfo_hash_write_entries(ctx, properties, 1, &first_child);
+
+            // The properties table has to stay alive — and, on 7.4+, stay
+            // referenced — until the whole subtree below it has been visited.
+            level->ht = properties;
+            zend_hash_internal_pointer_reset_ex(properties, &level->pos);
+#if PHP_VERSION_ID >= 70400
+            level->properties_to_release = properties;
+#endif
+        }
+        // Some internal classes (e.g. ext-protobuf messages) return NULL
+        // from get_properties: the block then holds get_gc()'s entries at
+        // most, and is still written so that the item stays closed.
+    }
+
+    if (!meminfo_aborted(ctx)) {
+        meminfo_object_write_gc_entries(ctx, zv, properties, level, &first_child);
+    }
+    meminfo_children_close(ctx, first_child);
+#if PHP_VERSION_ID >= 80100
+    if (Z_OBJCE_P(zv) == zend_ce_fiber) {
+        zend_object *object = Z_OBJ_P(zv);
+        zend_fiber *fiber = (zend_fiber *) object;
+        if (fiber->execute_data) {
+            level->pending_fiber = fiber->execute_data;
+        }
+    }
+#endif
+}
+
+/**
  * Write one item and report what is left to visit underneath it.
  *
  * Returns 0 when the item had already been visited (or when the traversal has
@@ -513,11 +604,7 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, const char
 
     // Objects are identified by their zend_object, so that several zvals
     // pointing at the same object collapse into one item.
-    if (Z_TYPE_P(zv) == IS_OBJECT) {
-        item_ptr = Z_OBJ_P(zv);
-    } else {
-        item_ptr = zv;
-    }
+    item_ptr = Z_TYPE_P(zv) == IS_OBJECT ? (const void *) Z_OBJ_P(zv) : (const void *) zv;
 
     if (meminfo_visit_item(&ctx->visited_items, item_ptr)) {
         return 0;
@@ -525,9 +612,8 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, const char
 
     if (! ctx->first_element) {
         MEMINFO_WRITE_LIT(w, "\n    },\n");
-    } else {
-        ctx->first_element = 0;
     }
+    ctx->first_element = 0;
 
     const meminfo_type_name *type_name = meminfo_type_name_of(zv);
 
@@ -554,86 +640,11 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, const char
     }
 
     if (Z_TYPE_P(zv) == IS_OBJECT) {
-        HashTable *properties;
-        zend_string *class_name;
+        meminfo_item_write_object(ctx, zv, level);
+        return 1;
+    }
 
-        properties = NULL;
-        class_name = Z_OBJCE_P(zv)->name;
-
-        MEMINFO_WRITE_LIT(w, ",\n        \"class\" : \"");
-        meminfo_write_json_escaped(w, ZSTR_VAL(class_name));
-        MEMINFO_WRITE_LIT(w, "\",\n        \"object_handle\" : \"");
-        meminfo_write_int(w, (int64_t) (int) Z_OBJ_HANDLE_P(zv));
-        MEMINFO_WRITE_LIT(w, "\",\n");
-
-        zend_object *zobj = Z_OBJ_P(zv);
-        int first_child = 1;
-
-        // One block for properties and get_gc() entries alike.
-        MEMINFO_WRITE_LIT(w, "        \"children\" : {");
-
-        if (meminfo_object_has_plain_properties(zobj)) {
-            // Read the declared slots directly: asking the handler would
-            // materialise a property table on the inspected object and leave
-            // it there.
-            meminfo_prop_slot *slots;
-            uint32_t slot_count;
-
-            if (meminfo_collect_declared_properties(zobj, &slots, &slot_count)) {
-                meminfo_slots_write_entries(ctx, slots, slot_count, &first_child);
-
-                level->slots = slots;
-                level->slot_count = slot_count;
-            } else {
-                ctx->aborted = 1;
-            }
-        } else {
-#if PHP_VERSION_ID >= 80000
-            properties = zobj->handlers->get_properties(zobj);
-            if (properties) {
-                GC_TRY_ADDREF(properties);
-            }
-#elif PHP_VERSION_ID >= 70400
-            /* PHP 7.4: get_properties takes a zval and GC_TRY_ADDREF does not exist yet */
-            properties = Z_OBJ_HANDLER_P(zv, get_properties) ? Z_OBJ_HANDLER_P(zv, get_properties)(zv) : NULL;
-            if (properties &&!(GC_FLAGS(properties) & GC_IMMUTABLE)) {
-                GC_ADDREF(properties);
-            }
-#else
-            /* Borrowed reference: get_properties never calls __debugInfo and needs no release */
-            properties = Z_OBJ_HANDLER_P(zv, get_properties) ? Z_OBJPROP_P(zv) : NULL;
-#endif
-
-            if (properties != NULL) {
-                meminfo_hash_write_entries(ctx, properties, 1, &first_child);
-
-                // The properties table has to stay alive — and, on 7.4+, stay
-                // referenced — until the whole subtree below it has been visited.
-                level->ht = properties;
-                zend_hash_internal_pointer_reset_ex(properties, &level->pos);
-#if PHP_VERSION_ID >= 70400
-                level->properties_to_release = properties;
-#endif
-            }
-            // Some internal classes (e.g. ext-protobuf messages) return NULL
-            // from get_properties: the block then holds get_gc()'s entries at
-            // most, and is still written so that the item stays closed.
-        }
-
-        if (!meminfo_aborted(ctx)) {
-            meminfo_object_write_gc_entries(ctx, zv, properties, level, &first_child);
-        }
-        meminfo_children_close(ctx, first_child);
-#if PHP_VERSION_ID >= 80100
-        if (Z_OBJCE_P(zv) == zend_ce_fiber) {
-            zend_object *object = Z_OBJ_P(zv);
-            zend_fiber *fiber = (zend_fiber *) object;
-            if (fiber->execute_data) {
-                level->pending_fiber = fiber->execute_data;
-            }
-        }
-#endif
-    } else if (Z_TYPE_P(zv) == IS_ARRAY) {
+    if (Z_TYPE_P(zv) == IS_ARRAY) {
         MEMINFO_WRITE_LIT(w, ",\n");
         meminfo_hash_write_children(ctx, Z_ARRVAL_P(zv), 0);
 
@@ -665,11 +676,12 @@ static void meminfo_level_push_opening(meminfo_context *ctx)
 #endif
 
     pushed = meminfo_stack_push(&ctx->stack);
-    if (pushed) {
-        *pushed = opened;
-    } else {
+    if (!pushed) {
         meminfo_level_close(ctx, &opened);
+        return;
     }
+
+    *pushed = opened;
 }
 
 /**
