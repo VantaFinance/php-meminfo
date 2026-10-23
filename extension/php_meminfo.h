@@ -1,3 +1,21 @@
+/**
+ * PHP Meminfo
+ *
+ * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
+ * @author    Vlad Shashkov <v.shashkov@pos-credit.ru>
+ * @copyright Copyright (c) 2010-2021, Benoit Jacquemont
+ * @copyright Copyright (c) 2026, The Vanta
+ */
+
+/*
+ * Public header of the meminfo extension.
+ *
+ * What the phpize/PECL convention expects from php_<ext>.h: the module entry,
+ * the module globals, the version and copyright macros and the few functions
+ * exported from meminfo.so. Everything shared only between the extension's own
+ * source files is in internal.h instead.
+ */
+
 #ifndef PHP_MEMINFO_H
 #define PHP_MEMINFO_H 1
 
@@ -38,7 +56,7 @@ extern zend_module_entry meminfo_module_entry;
 #endif
 
 #define MEMINFO_COPYRIGHT_SHORT "Copyright (c) 2010-" MEMINFO_COPYRIGHT_YEAR
-#define MEMINFO_COPYRIGHT MEMINFO_COPYRIGHT_SHORT " by Benoit Jacquemont & contributors"
+#define MEMINFO_COPYRIGHT MEMINFO_COPYRIGHT_SHORT " by Benoit Jacquemont, Vlad Shashkov, Vanta Team & contributors"
 
 // Size of the writer's staging buffer. Big enough that a dump of a large object
 // graph costs hundreds of writes rather than millions; 1 MiB measured 10-15%

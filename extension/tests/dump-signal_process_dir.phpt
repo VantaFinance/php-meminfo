@@ -8,6 +8,7 @@ Check that the "dir" of meminfo_dump_process() decides where the target writes t
     if (!function_exists('meminfo_dump_process')) die('skip meminfo_dump_process() is not available');
     if (PHP_VERSION_ID < 70100) die('skip the target side needs PHP 7.1 or later');
     if (PHP_ZTS) die('skip the target side is not available on ZTS builds');
+    if (!is_file(dirname(dirname(dirname(__FILE__))) . '/cli/bin/dump-meminfo')) die('skip cli/bin/dump-meminfo is not part of this source tree');
     if (!is_dir('/tmp') || !is_writable('/tmp')) die('skip /tmp is required for dump requests');
 ?>
 --FILE--
@@ -52,7 +53,7 @@ CODE;
 
         $command = escapeshellarg(meminfo_test_php_binary())
             . ' -n -d ' . escapeshellarg('extension=' . meminfo_test_extension_path())
-            . ' ' . escapeshellarg(dirname(dirname(__FILE__)) . '/dump-meminfo')
+            . ' ' . escapeshellarg(dirname(dirname(dirname(__FILE__))) . '/cli/bin/dump-meminfo')
             . ' ' . (int) $pid
             . ' --dir=' . escapeshellarg($requestedDir)
             . ' --timeout=60';

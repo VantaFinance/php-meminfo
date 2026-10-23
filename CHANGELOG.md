@@ -1,103 +1,37 @@
-# Unreleased
+# 0.1.0
+
+First release of the Vanta fork of [BitOne/php-meminfo](https://github.com/BitOne/php-meminfo)
+(upstream history up to 1.1.1, 2021). Supports PHP 7.0 – 8.5.
+
+## Added
+ - Dumping an **already running process** without changing it: `dump-meminfo <pid>` /
+   `meminfo_dump_process()`, served at the next safe point between opcodes (target: PHP 7.1+, NTS,
+   POSIX), configured by `meminfo.dump_signal` (default `SIGURG`) and `meminfo.dump_dir`
+ - **Browser UI** (`ui/`) that analyzes a dump entirely client-side: leak suspects (retained size),
+   growth against an earlier dump, summary, search, reference paths and a graph view
+ - Locals of **suspended fibers and Swoole coroutines** (PHP 8.1+), closure and generator state,
+   SPL containers and other `get_gc()` content, function `static` variables, registered callbacks
+   and user constants
+ - Installation with PIE (`pie install vanta/meminfo`) and the `vanta/dump-meminfo` Composer package
+   (`vendor/bin/dump-meminfo`)
+ - Version and copyright year as build arguments; Docker build/test targets, Swoole and memory
+   probes under `tools/repro/`
+
+## Changed
+ - Dumps are dozens of times faster (1M objects: from about 35 s to under 1 s), allocate nothing
+   from the Zend heap, no longer leave memory behind in the dumped process and no longer crash on
+   deeply nested structures
+ - Failures throw (`InvalidArgumentException`, `RuntimeException`) instead of writing a truncated
+   dump; `dump-meminfo` maps them onto exit codes 2 and 1
+ - `meminfo.c` is split into modules with internal symbols hidden
+
+## Fixed
+ - Dumps are always valid JSON (invalid UTF-8, NUL in keys, objects without properties such as
+   ext-protobuf messages)
+ - Crashes and corrupt dumps under Swoole and with suspended fibers on PHP 8.1, loading on PHP 7.4,
+   and `__debugInfo` being called on PHP 7.0 – 7.3
+ - Variables attributed to the wrong function, `<GLOBAL>` labels on coroutine frames
+ - `make` on GNU Make 3.81 (macOS)
 
 ## Removed
- - The PHP CLI analyzer (`analyzer/`, `bin/analyzer` and its phpspec specs) is removed, together with its Composer setup, Docker stage, CI step and `make install` / `test-analyzer` / `summary` / `analyzer` targets. Use the browser UI instead: it covers summary, top children, query and reference paths, and adds leak suspects, growth and the graph. `make test` now runs the extension's `.phpt` suite only. The UI's parity baselines recorded by the analyzer are kept frozen in `ui/tests/fixtures/parity/`
-
-## Bug fixes
- - A fatal error during a dump — `memory_limit` reached inside an object's `get_properties()` or `get_gc()` handler — no longer leaks the dump's bookkeeping (about 1 MB plus the visited set) and its output file. For a signal-triggered dump it also no longer leaves the `.tmp` file behind, `max_execution_time`'s timer paused and further dumps refused: everything is put back, the trigger is told through the `.error` file, and the fatal error goes on as before. A signal-triggered dump lifts `memory_limit` while it runs, so a process sitting just under its limit is dumped instead of killed by the dump (if the limit cannot be put back afterwards because the handlers left memory allocated, it stays lifted and the error log says so). The walk itself allocates nothing from the Zend heap any more
- - A dump cut short because the extension ran out of memory for its own bookkeeping is reported as a failure — `meminfo_dump()` throws, the signal path writes the `.error` file and keeps no file — instead of being closed as valid JSON and passed off as complete. Write errors name their cause (`No space left on device`, …), and a `write()` that makes no progress is an error instead of an endless loop
- - [GITHUB-124](https://github.com/BitOne/php-meminfo/issues/124) A dump is always valid JSON: a byte that is not part of well-formed UTF-8 in a key, a property or a class name is written as U+FFFD instead of raw, which made `json_decode()` reject the whole dump. Array keys and property names are written in full — a NUL inside a key used to cut it short, so `"a\0x"` and `"a\0y"` both came out as `"a"`. Class names still stop at the first NUL, which keeps every `class@anonymous` instance under one class
- - [GITHUB-63](https://github.com/BitOne/php-meminfo/issues/63), [GITHUB-133](https://github.com/BitOne/php-meminfo/issues/133) Objects that hold data outside their properties now list it as children: a closure's `use` variables, bound `$this` and `static` variables, the locals of a suspended generator (PHP 7.1+), and the content of `ArrayObject`, `ArrayIterator`, `SplObjectStorage`, `SplDoublyLinkedList`, `SplHeap`, `SplPriorityQueue`, `SplFixedArray`, `WeakMap` and objects of other extensions — everything their `get_gc()` handler reports. Before, all of that was missing from dumps, and with it whatever it kept alive
- - [GITHUB-75](https://github.com/BitOne/php-meminfo/issues/75), [GITHUB-78](https://github.com/BitOne/php-meminfo/issues/78) New roots: `static` variables of functions and methods (frame `<STATIC_VARIABLE>`, symbol `f()::$x` or `C::m()::$x`), the callables registered with `set_error_handler()`, `set_exception_handler()`, `register_shutdown_function()` (with its arguments) and `ob_start()` (frame `<CALLBACK>`), and user constants holding values of their own (frame `<CONSTANT>`). `spl_autoload_register()` callbacks stay out of reach: SPL keeps them private
- - [GITHUB-117](https://github.com/BitOne/php-meminfo/issues/117) `meminfo_dump()` never lets PHP code run, or another coroutine take over, while it walks the heap. Under Swoole's file hook a plain `fwrite()` yields, and a coroutine running mid-walk could free what the walk was holding (the likely cause of the crashes and corrupt dumps reported with Swoole). A regular file is now written with `write(2)` on its descriptor, `php://memory` and `php://temp` through the stream as before, and any other stream — sockets, filters, userspace wrappers — through a temporary file copied in once the walk is over; the dump is never held in memory
- - `meminfo_dump()` called from inside a Swoole coroutine includes the global variables: the coroutine's frames do not lead back to the main script
- - The first frame of a coroutine is labelled with its function instead of `<GLOBAL>`
- - `dump-meminfo` explains a timeout by the likeliest causes: a target that ran no PHP code in the meantime (an idle event loop, a long blocking call), or one that wrote elsewhere
- - The root `Makefile` works with GNU Make 3.81, the version macOS ships as `/usr/bin/make`: recipes no longer rely on `.ONESHELL`, which 3.81 ignores, so `make build`, `make test-one` and `make clean` no longer fail there. `make clean` also removes everything `phpize` leaves behind (`configure~`, `config.h.in~`, `include/`), `make rebuild` cannot race under `-j`, and the extension's own build no longer floods the output with undefined-variable warnings
- - Dumps no longer have blank lines and lines holding a lone comma: every item is now written with its fields one per line, an empty `children` as `{}`, and the document closes with consistent indentation. The JSON itself is unchanged — same keys, order and value types — so the browser UI and any `json_decode()` read old and new dumps alike; only tools that compare dumps as text see a difference. A dump with no items, which would have closed with an extra `}`, is now valid JSON too
- - `meminfo_dump()` no longer crashes on deeply nested structures. The traversal used to recurse once per level and overflowed the C stack above roughly 28 000 levels — and around 7 000 inside a `Fiber`, which has a smaller stack. A 200 000-level object chain or nested array now dumps normally
- - Dumping no longer leaves memory behind in the process being dumped. Reading an object's properties through `get_properties()` attached a property table to every object it touched, and walking the frames attached a symbol table to every frame: about 37 MB retained per 100 000 objects, and 1.3 KB per frame. Both are now read without building anything, so a dump retains nothing
- - A dump no longer fails near `memory_limit`. Its bookkeeping used to be allocated by the Zend allocator and added some 75 MB of transient peak per 100 000 objects, which hit the limit of the very process being investigated for memory use. All of it is now allocated outside the limit, and the process's resident size no longer stays at the dump's peak afterwards
- - Dumping is 30 to 35 times faster — 1M objects went from about 35 s to about 1 s — and issues three orders of magnitude fewer `write(2)` calls. The JSON escaper made 34 passes over every string it wrote; it is now a single pass, and output is buffered instead of written per field
- - Variables are attributed to the user function they belong to. A local observed while an internal function such as `array_map()` was on the stack used to be labelled `array_map()`
- - Dumping while a `Fiber` is suspended no longer crashes on PHP 8.1. The writer used to repoint `EG(current_execute_data)` at the fiber's own stack and leave it there
- - Fixes loading of the extension on PHP 7.4 (`GC_TRY_ADDREF: symbol not found`) and the wrong argument passed to `get_properties` on PHP 7.4
- - Object properties are no longer read through `__debugInfo` on PHP 7.0 – 7.3, matching the behaviour on PHP 7.4+
- - The dump stays valid JSON for objects whose `get_properties` handler returns NULL, such as ext-protobuf messages, `MapField` and `RepeatedField` (broke dumps of applications using grpc/protobuf). Such objects now have an empty `children`; the dump format is otherwise unchanged
- - Item identifier buffers are large enough for any 64-bit pointer, and a type without a name is dumped as `unknown` instead of crashing
-
-## Improvement
- - `meminfo_dump_process()` and `dump-meminfo` pick up a small dump sooner: the trigger looks for the file after 5 ms, then twice as long each time up to 50 ms, instead of every 50 ms
- - Dumping takes another 33 to 57% less time, with byte-identical output: the writer's append is inlined, the output buffer is 1 MiB instead of 64 KiB, the JSON escaper skips plain bytes through a lookup table, integers and addresses are formatted right to left and appended in one go, and type names come from a static table. Measured with 1M objects × 4 properties (1 GB dump, best of 3, aarch64/musl, 2 GB container): PHP 7.0 1.55 s → 0.87 s, 7.4 1.71 s → 0.73 s, 8.1 1.26 s → 0.73 s, 8.5 1.20 s → 0.80 s; the dump uses 1 MB more memory. An item of a type the engine has no name for is dumped as `unknown` on every version (on PHP 8.1+ the engine's own lookup has no answer for it)
- - The version reported by `phpversion('meminfo')` and `phpinfo()` and the copyright year are build arguments: `./configure --with-meminfo-version=… --with-meminfo-copyright-year=…`, `make build MEMINFO_VERSION=…`, `make docker-build MEMINFO_VERSION=…`. Without them the version comes from `extension/VERSION` and the year from `SOURCE_DATE_EPOCH` or the clock; CI builds tags as their name and other commits as `<VERSION>+g<sha>`. `phpinfo()` shows the copyright
- - `extension/meminfo.c` is split into modules (`writer.c`, `ptr_set.c`, `traverse.c`, `items.c`, `fibers.c`, `signal.c`, `procinfo.c`, `trigger.c`, shared declarations in `internal.h`); internal functions stay out of the dynamic symbol table
- - Dumps include the locals of **suspended coroutines and fibers** (PHP 8.1+): the extension follows every fiber switch through the engine's fiber observers and walks the frames each suspended context stopped at. Native `Fiber`s are covered as they are, and a dump taken inside one now reaches the frames that started it; Swoole coroutines are covered with `swoole.enable_fiber_mock=1`. 10 000 suspended Swoole coroutines dump in about 10 ms
- - Adds `tools/repro/swoole/` and `make repro-swoole` / `repro-swoole-test`: a Swoole image (6.2.3, or 5.1.8 on PHP 8.1) with scenarios checking what a dump holds inside and outside coroutines, and a CI job running them on PHP 8.1, 8.3 and 8.5
- - Adds a **browser UI** (`ui/`, TypeScript + Svelte 5) that analyzes a dump entirely in the browser, with no backend and no network: leak suspects from a dominator tree (retained size per item and per class), growth against an earlier dump, summary, top children, search, and an inspector with every reference path from a root. Dumps are streamed into a Web Worker and held in typed arrays, so a 300 MB dump opens in about 1.3 s with about 2 MB on the page; it also opens dumps `json_decode` rejects for invalid UTF-8. `make ui-install`, `make ui-dev`; see "Analyzing a dump in the browser" in the README. A **Graph** view draws what keeps an item reachable — every shortest path from a root, merged, with the items all paths go through highlighted — or the neighbourhood of an item, expanded by double-click; every address in the UI opens it. Drawn with Cytoscape.js, loaded only when the view opens. The UI from `master` is published on GitHub Pages; its start page explains what the extension does, how to install it, its `php.ini` settings and how to take a dump
- - Dumps the memory of an **already running process**, without changing the application. `dump-meminfo <pid>` (or `meminfo_dump_process()`) signals the target, which writes the dump at the next safe point between opcodes and never into its own output; the command prints the path of the finished file. Configured with `meminfo.dump_signal` (default `SIGURG`, whose default action is to ignore — unlike `SIGUSR2`, which php-fpm leaves lethal in its workers) and `meminfo.dump_dir`. The target must be PHP 7.1 or later, non-ZTS, on POSIX; the trigger works from any build, PHP 7.0 included. Works without `sigqueue()` and without `/proc`, e.g. on macOS: the dump is then found by the target's pid and the time it started, and the facts `/proc` would provide come from the kernel's process record. See "Dumping a running process" in the README
- - `--dir` (`'dir'` for `meminfo_dump_process()`) now decides where the target writes the dump: the directory is handed to it in a request file under `/tmp`. Previously it only told the trigger where to look, so a target configured with another `meminfo.dump_dir` was waited on for the whole `--timeout` — and, without `sigqueue()`, wrote a fresh full dump on every resend. A target that cannot write to that directory now reports why at once; resends without `sigqueue()` are capped at three
- - Builds on PHP 8.2 and later (`EG(vm_interrupt)` became a `zend_atomic_bool`); the CI matrix now covers 7.0 – 8.5
- - Adds a `Dockerfile` and `make docker-build` / `docker-test` / `docker-matrix` targets to build and test the extension for a chosen `PHP_VERSION`
- - Adds `make install-cli` to install the `dump-meminfo` command, and `tools/repro/memory/` with the probes used to measure what a dump costs the process it is taken from
- - Failures are reported by throwing rather than by a return value. `meminfo_dump_process()` returns the dump path or throws — `InvalidArgumentException` when the call itself is wrong, `RuntimeException` for the target or the environment; `dump-meminfo` maps those onto exit codes 2 and 1. `meminfo_dump()` now also throws `RuntimeException` when the dump cannot be written, instead of silently leaving a truncated file behind. Not a BC break: `meminfo_dump_process()` has never been released, so its `false`-returning form never shipped
-
-# 1.1.1 PHP Meminfo v1.1.1 (2021-02-17)
-Fixes segfault on symbol table not properly rebuilt.
-
-# 1.1 PHP Meminfo v1.1 (2021-02-15)
-This version drops support for PHP 5.5 and adds official supports for PHP 7.4.
-
-Thanks a lot to @tony2001, @WyriHaximus, @vudaltsov and @ahocquard for their contibutions on making PHP Meminfo compatible with PHP .7.4!
-
-# 1.0.4 Ygramul (2018-08-13)
- - [GITHUB-75](https://github.com/BitOne/php-meminfo/issues/75) Now goes through static members of classes as well the usual frame execution browsing.
-
-# 1.0.3 Ygramul (2018-08-13)
- - [GITHUB-76](https://github.com/BitOne/php-meminfo/issues/76) Fixes wrong non matching item reference from children, introduced in v1.0.2
-
-# 1.0.2 Ygramul (2018-08-08)
-
-## Bug fixes
- - [GITHUB-70](https://github.com/BitOne/php-meminfo/issues/70) Fixes duplication of scalars in PHP 7 when multiple references are used
- - [GITHUB-68](https://github.com/BitOne/php-meminfo/issues/68) Fixes duplication of objects in PHP 7 when multiple references are used
- - [GITHUB-67](https://github.com/BitOne/php-meminfo/issues/67) Fixes wrong starting frame in PHP 7, by @mathieuk
- - [GITHUB-61](https://github.com/BitOne/php-meminfo/issues/61) Removes now obsolete Brew installation instructions
-
-## Improvement
- - [GITHUB-73](https://github.com/BitOne/php-meminfo/issues/73) Adds explanation on memory usage difference, between what is used by objects and what is reported
-
-# 1.0.1 Ygramul (2017-11-24)
-
-## Bug fixes
- - [GITHUB-49](https://github.com/BitOne/php-meminfo/issues/49) Properly escape control character from array index
-
-## Improvements
- - [GITHUB-48](https://github.com/BitOne/php-meminfo/issues/48) Adds information about Brew installation on MacOS X, by @jdecool
- - [GITHUB-47](https://github.com/BitOne/php-meminfo/issues/47) Fixes on version support, by @jdecool
-
-# 1.0.0 Ygramul (2017-11-16)
-
-## Improvements
- - [GITHUB-45](https://github.com/BitOne/php-meminfo/issues/45) Adds PHP 7 support
- - keeps only the dump method in the extension. From the data gathered by it, all analysis can be done.
- - summary is now done as a analyzer
- - doc separation between "usage" and "how to hunt down memory leaks"
- - tests + travis
-
-# 0.3.0 (2016-03-23)
-
-## Improvements
- - Remove UI
- - Adds frame and symbol information
- - Adds analyzers to find path that kept references
-
-# 0.2.0 (2015-04-30)
-
-## Improvements
- - Adds an feature to display instances count summary by class.
-
-# 0.1.0 (2014-02-15)
-
-## Improvements
- - Migrating from Google Code to GitHub
- - ADDS ABility to display a list of object with Class name and handle
+ - The PHP CLI analyzer (`analyzer/`, `bin/analyzer`): the browser UI replaces it

@@ -14,6 +14,7 @@ SHELL := bash
 # --- Project ---
 PROJECT  ?= $(shell basename $(CURDIR))
 EXT_DIR  ?= extension
+CLI_DIR  ?= cli
 
 # --- Toolchain ---
 # Override these to build against a specific PHP installation, e.g.:
@@ -93,7 +94,7 @@ DESTDIR ?=
 .PHONY: install-cli
 install-cli: ## Install the dump-meminfo command into $(PREFIX)/bin (may need sudo)
 	install -d $(DESTDIR)$(PREFIX)/bin
-	install -m 0755 $(EXT_DIR)/dump-meminfo $(DESTDIR)$(PREFIX)/bin/dump-meminfo
+	install -m 0755 $(CLI_DIR)/bin/dump-meminfo $(DESTDIR)$(PREFIX)/bin/dump-meminfo
 	@echo "Installed $(DESTDIR)$(PREFIX)/bin/dump-meminfo"
 
 ##@ Testing
@@ -121,6 +122,7 @@ LINT_DIRS := doc $(EXT_DIR)/tests/fixtures ui/tests/fixtures tools/repro
 .PHONY: lint
 lint: ## Syntax-check the repository's PHP scripts with php -l
 	find $(LINT_DIRS) -type f -name '*.php' -print0 | xargs -0 -n1 $(PHP) -l
+	$(PHP) -l $(CLI_DIR)/bin/dump-meminfo
 
 .PHONY: check
 check: lint test ## Run linting and the extension's test suite

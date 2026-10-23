@@ -1,0 +1,39 @@
+{
+    "name": "vanta/meminfo",
+    "description": "PHP extension that dumps the content of PHP memory as JSON, to hunt down memory leaks",
+    "type": "php-ext",
+    "keywords": ["memory", "memory leak", "meminfo", "dump", "profiling", "debug", "extension"],
+    "homepage": "https://github.com/VantaFinance/php-meminfo",
+    "license": "MIT",
+    "authors": [
+        {"name": "Benoit Jacquemont", "email": "benoit.jacquemont@gmail.com"},
+        {"name": "Vlad Shashkov", "email": "v.shashkov@pos-credit.ru"},
+        {"name": "Vanta Team", "homepage": "https://vanta.ru/"}
+    ],
+    "support": {
+        "issues": "https://github.com/VantaFinance/php-meminfo/issues",
+        "source": "https://github.com/VantaFinance/php-meminfo"
+    },
+    "require": {
+        "php": ">=7.0"
+    },
+    "php-ext": {
+        "extension-name": "meminfo",
+        "build-path": "extension",
+        "support-nts": true,
+        "support-zts": true,
+        "os-families-exclude": ["windows"],
+        "configure-options": [
+            {
+                "name": "with-meminfo-version",
+                "description": "Version reported by phpversion('meminfo') and phpinfo() (default: the content of extension/VERSION)",
+                "needs-value": true
+            },
+            {
+                "name": "with-meminfo-copyright-year",
+                "description": "Last year of the copyright notice (default: the year of SOURCE_DATE_EPOCH when set, else the current year)",
+                "needs-value": true
+            }
+        ]
+    }
+}

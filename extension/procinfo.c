@@ -1,4 +1,20 @@
-/* Facts about another process: clock, /proc or sysctl, uids, start time, trust checks. */
+/**
+ * PHP Meminfo
+ *
+ * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
+ * @author    Vlad Shashkov <v.shashkov@pos-credit.ru>
+ * @copyright Copyright (c) 2010-2021, Benoit Jacquemont
+ * @copyright Copyright (c) 2026, The Vanta
+ */
+
+/*
+ * Facts about another process: clock, /proc or sysctl, uids, start time, trust checks.
+ *
+ * Before a signal is sent, the trigger has to know the target is the process
+ * it means, run by the same user, and actually listening for that signal —
+ * otherwise the signal could kill it. These facts come from /proc on Linux and
+ * from the kernel's process record via sysctl where there is no /proc.
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"

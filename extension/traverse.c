@@ -1,4 +1,20 @@
-/* Traversal: work stack, execution frames and the other roots of the dump. */
+/**
+ * PHP Meminfo
+ *
+ * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
+ * @author    Vlad Shashkov <v.shashkov@pos-credit.ru>
+ * @copyright Copyright (c) 2010-2021, Benoit Jacquemont
+ * @copyright Copyright (c) 2026, The Vanta
+ */
+
+/*
+ * Traversal: work stack, execution frames and the other roots of the dump.
+ *
+ * Decides what the dump starts from — the frames of the running code, globals,
+ * class statics, static variables, registered callbacks, constants — and walks
+ * everything they reach with an explicit work stack instead of recursion, so
+ * that arbitrarily deep structures cannot overflow the C stack.
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"

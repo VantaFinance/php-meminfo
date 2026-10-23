@@ -1,4 +1,20 @@
-/* Item emission: one dump item and its "children" block per zval. */
+/**
+ * PHP Meminfo
+ *
+ * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
+ * @author    Vlad Shashkov <v.shashkov@pos-credit.ru>
+ * @copyright Copyright (c) 2010-2021, Benoit Jacquemont
+ * @copyright Copyright (c) 2026, The Vanta
+ */
+
+/*
+ * Item emission: one dump item and its "children" block per zval.
+ *
+ * Turns a single value into the JSON a reader of the dump relies on: type,
+ * size, class, and the links to what it holds. Objects are identified by their
+ * zend_object so that every reference to one object leads to the same item,
+ * which is what makes reference paths and retained sizes computable.
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"

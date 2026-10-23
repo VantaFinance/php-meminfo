@@ -7,19 +7,25 @@
  * wrapper around meminfo_dump_process(): it parses argv and prints the path of
  * the dump the target wrote.
  *
+ * Installed as vendor/bin/dump-meminfo by the vanta/dump-meminfo Composer
+ * package, whose bin proxy includes this file instead of executing it: keep
+ * everything at the top level working when included.
+ *
  * Written for PHP 7.0 syntax — it has to run on the oldest version the
  * extension supports. It also sticks to functions that are always built in
  * (no ctype, posix or json): it must work under `php -n`, where shared
  * extensions are not loaded.
  *
  * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
+ * @author    Vlad Shashkov <v.shashkov@pos-credit.ru>
  * @copyright 2010-2021 Benoit Jacquemont
+ * @copyright 2026 The Vanta
  * @license   http://opensource.org/licenses/MIT MIT
  */
 
-define('EXIT_OK', 0);
-define('EXIT_FAILED', 1);
-define('EXIT_USAGE', 2);
+defined('EXIT_OK') || define('EXIT_OK', 0);
+defined('EXIT_FAILED') || define('EXIT_FAILED', 1);
+defined('EXIT_USAGE') || define('EXIT_USAGE', 2);
 
 /**
  * @param resource $stream
@@ -157,7 +163,9 @@ function dump_meminfo_main($argv)
         dump_meminfo_write(STDERR, implode("\n", array(
             'dump-meminfo: the meminfo extension is not loaded in this PHP.',
             '',
-            'Enable it by adding',
+            'Install it with',
+            '    pie install vanta/meminfo',
+            'or enable an existing build by adding',
             '    extension=meminfo.so',
             'to your php.ini, or run this command with',
             '    php -d extension=meminfo.so ' . $argv[0] . ' ...',

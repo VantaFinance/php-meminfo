@@ -3,6 +3,26 @@ name: Build and test the extension
 on: push
 
 jobs:
+  # PIE builds a tag without --with-meminfo-version, so the version it reports
+  # is extension/VERSION: a release tag has to match it.
+  release-version:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check that extension/VERSION matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(tr -d ' \r\n' < extension/VERSION)"
+          echo "tag: $GITHUB_REF_NAME, extension/VERSION: $version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error file=extension/VERSION::extension/VERSION is '$version' but the tag is '$GITHUB_REF_NAME': bump extension/VERSION to '$tag' and tag again"
+            exit 1
+          fi
+          echo "extension/VERSION matches the tag"
+
   build:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -11,6 +31,8 @@ jobs:
         php-versions: ['7.0', '7.1', '7.2', '7.3', '7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
         sigqueue: ['yes']
         os: ['ubuntu-22.04']
+        # An include that differs only in ts adds a job instead of changing one.
+        ts: ['nts']
         include:
           # Built as if sigqueue() did not exist, which is the macOS situation:
           # the target names its dump after its pid and the trigger has to find it.
@@ -21,6 +43,12 @@ jobs:
           - php-versions: '8.1'
             sigqueue: 'yes'
             os: 'macos-latest'
+          # A thread-safe build, which composer.json declares to PIE
+          # (support-zts). The signal path is NTS-only and skips there.
+          - php-versions: '8.4'
+            sigqueue: 'yes'
+            os: 'ubuntu-22.04'
+            ts: 'zts'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,6 +77,8 @@ jobs:
           php-version: ${{ matrix.php-versions }}
           extensions: posix, json, ${{ steps.protobuf.outputs.extension }}
           coverage: none
+        env:
+          phpts: ${{ matrix.ts || 'nts' }}
 
       # run-tests.php of PHP 8 starts PHP with -n, so protobuf has to be loaded by
       # its full path. That path is taken from the ini setup-php wrote: on macOS
@@ -91,6 +121,7 @@ jobs:
           ./configure --with-meminfo-version="$version" --with-meminfo-copyright-year="$year"
           make
           php -d extension=$PWD/modules/meminfo.so --ri meminfo | grep -E '^(Version|Copyright)'
+          php -r 'echo "Thread safety: ", PHP_ZTS ? "ZTS" : "NTS", "\n";'
 
       # On macOS sigqueue() is absent by itself; the check proves the kill path is the one tested.
       - name: Check that sigqueue() is disabled
@@ -118,10 +149,18 @@ jobs:
         run: |
           grep -E '(PASS|FAIL).*bug-protobuf_null_properties' extension/run-tests.log
 
+      # The process tests run cli/bin/dump-meminfo and skip when it is missing, so
+      # a wrong path would pass unnoticed. Their target side needs PHP 7.1+ and NTS.
+      - name: Check that the dump-meminfo tests ran
+        if: matrix.php-versions != '7.0' && matrix.ts != 'zts'
+        run: |
+          grep -E '(PASS|FAIL).*tests/dump-signal_process\.phpt' extension/run-tests.log
+          grep -E '(PASS|FAIL).*tests/dump-signal_process_dir\.phpt' extension/run-tests.log
+
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: ext-tests-output-${{ matrix.os }}-php-${{ matrix.php-versions }}-sigqueue-${{ matrix.sigqueue }}
+          name: ext-tests-output-${{ matrix.os }}-php-${{ matrix.php-versions }}-${{ matrix.ts || 'nts' }}-sigqueue-${{ matrix.sigqueue }}
           path: |
             extension/tests/*.out
             extension/tests/*.diff
@@ -153,3 +192,92 @@ jobs:
 
       - name: Run the Swoole scenarios
         run: make repro-swoole PHP_VERSION=${{ matrix.php-versions }}
+
+  # The two Composer packages as their users get them: vanta/meminfo built by
+  # PIE from the release archive (git archive, trimmed by .gitattributes), and
+  # vanta/dump-meminfo installed by Composer, run through vendor/bin.
+  packages:
+    runs-on: ubuntu-22.04
+    env:
+      PIE_VERSION: 1.5.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The runner context is not available in a job's env.
+      - name: Set up the work directories
+        run: |
+          echo "DIST_DIR=$RUNNER_TEMP/meminfo-dist" >> "$GITHUB_ENV"
+          echo "PROJECT_DIR=$RUNNER_TEMP/cli-project" >> "$GITHUB_ENV"
+          echo "DUMP_DIR=$RUNNER_TEMP/dumps" >> "$GITHUB_ENV"
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: posix, json, zip
+          tools: composer:v2
+          coverage: none
+
+      - name: Validate composer.json files
+        run: |
+          composer validate --strict composer.json
+          composer validate --strict cli/composer.json
+
+      - name: Install PIE
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL -o pie.phar "https://github.com/php/pie/releases/download/${PIE_VERSION}/pie.phar"
+          gh attestation verify --owner php pie.phar
+          sudo install -m 0755 pie.phar /usr/local/bin/pie
+          rm pie.phar
+          pie --version
+
+      - name: Unpack the release archive
+        run: |
+          mkdir -p "$DIST_DIR"
+          git archive --format=tar HEAD | tar -x -C "$DIST_DIR"
+          echo "Archive content:"
+          find "$DIST_DIR" -maxdepth 2 | sort
+
+      # As root: PIE writes into the system extension and ini directories and
+      # refuses to call sudo itself without an interactive terminal. The path
+      # repository goes into root's PIE config too, or install would not see it.
+      - name: Install the extension with PIE
+        run: |
+          sudo pie repository:add path "$DIST_DIR"
+          sudo pie install --no-interaction --with-php-config="$(command -v php-config)" 'vanta/meminfo:*@dev'
+          php --ri meminfo | grep -E '^(Version|Copyright)'
+          php -m | grep -qx meminfo
+
+      - name: Install vanta/dump-meminfo with Composer
+        run: |
+          mkdir -p "$PROJECT_DIR"
+          cd "$PROJECT_DIR"
+          composer init --no-interaction --name=ci/project --stability=dev
+          composer config repositories.dump-meminfo '{"type": "path", "url": "${{ github.workspace }}/cli", "options": {"symlink": false}}'
+          composer require --no-interaction 'vanta/dump-meminfo:*@dev'
+          composer show vanta/dump-meminfo
+          vendor/bin/dump-meminfo --help
+
+      - name: Dump a running process with vendor/bin/dump-meminfo
+        run: |
+          mkdir -p "$DUMP_DIR"
+          php -r '$deadline = microtime(true) + 60; while (microtime(true) < $deadline) { for ($i = 0; $i < 100000; $i++) {} }' &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          sleep 1
+          echo "Target pid: $pid"
+          file=$("$PROJECT_DIR/vendor/bin/dump-meminfo" "$pid" --dir="$DUMP_DIR" --timeout=20)
+          echo "Dump written to: $file"
+          ls -l "$file"
+          php -r '$dump = json_decode(file_get_contents($argv[1]), true); if (!isset($dump["header"], $dump["items"])) { fwrite(STDERR, "not a meminfo dump\n"); exit(1); } echo count($dump["items"]), " items\n";' "$file"
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: packages-output
+          path: |
+            ${{ runner.temp }}/dumps
+            ${{ runner.temp }}/cli-project/composer.json

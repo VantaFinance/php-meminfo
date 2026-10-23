@@ -1,4 +1,20 @@
-/* Signal-triggered dumps: dump_signal parsing, the handler, the interrupt hook, dump to file. */
+/**
+ * PHP Meminfo
+ *
+ * @author    Benoit Jacquemont <benoit.jacquemont@gmail.com>
+ * @author    Vlad Shashkov <v.shashkov@pos-credit.ru>
+ * @copyright Copyright (c) 2010-2021, Benoit Jacquemont
+ * @copyright Copyright (c) 2026, The Vanta
+ */
+
+/*
+ * Signal-triggered dumps: dump_signal parsing, the handler, the interrupt hook, dump to file.
+ *
+ * The target side of dumping a process that is already running: it takes a
+ * dump on request without any change to the application's code. The signal
+ * handler only records the request; the dump is written at the next safe point
+ * between opcodes, to a file of its own, never into the process's output.
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"

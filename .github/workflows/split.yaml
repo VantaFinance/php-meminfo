@@ -1,0 +1,92 @@
+name: Split the dump-meminfo package
+
+# cli/ is the Composer package vanta/dump-meminfo. Packagist reads only a
+# repository's root composer.json, and this one is vanta/meminfo (PIE), so cli/
+# is mirrored into the read-only VantaFinance/dump-meminfo repository, which
+# Packagist watches: master on every push to master, and every tag.
+on:
+  push:
+    branches: [master]
+    tags: ['*']
+
+# A push of master and of a tag on it start two runs that push to the same
+# repository: one at a time, so neither is rejected as non-fast-forward.
+concurrency:
+  group: split-dump-meminfo
+  cancel-in-progress: false
+
+jobs:
+  split:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Until the split repository and the GitHub App exist, skip instead of
+      # failing every push. The App's client ID is not secret (an organization or
+      # repository variable); its private key is, and is handed only to the step
+      # that mints the token.
+      - name: Check for the split GitHub App
+        id: app
+        env:
+          SPLIT_APP_CLIENT_ID: ${{ vars.SPLIT_APP_CLIENT_ID }}
+          SPLIT_APP_PRIVATE_KEY: ${{ secrets.SPLIT_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$SPLIT_APP_CLIENT_ID" ] && [ -n "$SPLIT_APP_PRIVATE_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::SPLIT_APP_CLIENT_ID or SPLIT_APP_PRIVATE_KEY is not set; cli/ is not split into VantaFinance/dump-meminfo"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The split commits cli/ onto master of the split repository before it
+      # tags, so a tag behind master would roll that master back.
+      - name: Check that the tag is the head of master
+        if: steps.app.outputs.enabled == 'true' && github.ref_type == 'tag'
+        run: |
+          master=$(git rev-parse origin/master)
+          echo "tag $GITHUB_REF_NAME: $GITHUB_SHA, master: $master"
+          if [ "$GITHUB_SHA" != "$master" ]; then
+            echo "::error::tag $GITHUB_REF_NAME is not the head of master ($master): splitting it would roll back master of VantaFinance/dump-meminfo; tag the head of master"
+            exit 1
+          fi
+
+      # An installation token of the App, scoped to the split repository and to
+      # contents: write, valid for an hour and revoked when the job ends.
+      - name: Create a token for VantaFinance/dump-meminfo
+        id: app-token
+        if: steps.app.outputs.enabled == 'true'
+        # v3.2.0, pinned by commit like the split action below.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ vars.SPLIT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SPLIT_APP_PRIVATE_KEY }}
+          owner: VantaFinance
+          repositories: dump-meminfo
+          permission-contents: write
+
+      - name: Split cli/ into VantaFinance/dump-meminfo (${{ github.ref_name }})
+        if: steps.app.outputs.enabled == 'true'
+        # v2.4.5, pinned by commit: the action gets a token with write access.
+        uses: symplify/monorepo-split-github-action@14e42e2437f674b8987c1f50ca3689116aea1893
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        with:
+          package_directory: cli
+          repository_organization: VantaFinance
+          repository_name: dump-meminfo
+          branch: master
+          tag: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com
+
+      - name: Report the split
+        if: steps.app.outputs.enabled == 'true'
+        run: |
+          echo "Split cli/ at ${GITHUB_SHA::7} into VantaFinance/dump-meminfo:"
+          echo "  branch: master"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "  tag:    $GITHUB_REF_NAME"
+          fi

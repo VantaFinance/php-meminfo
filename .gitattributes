@@ -1,0 +1,15 @@
+# The archive of a tag is what PIE downloads and builds (vanta/meminfo, see
+# composer.json): keep it to the extension. The dump-meminfo command ships as
+# its own package from the split of cli/; the browser UI is not distributed.
+/.github            export-ignore
+/.gitattributes     export-ignore
+/.gitignore         export-ignore
+/.dockerignore      export-ignore
+/CMakeLists.txt     export-ignore
+/CMakePresets.json  export-ignore
+/Dockerfile         export-ignore
+/Makefile           export-ignore
+/cli                export-ignore
+/doc                export-ignore
+/tools              export-ignore
+/ui                 export-ignore
