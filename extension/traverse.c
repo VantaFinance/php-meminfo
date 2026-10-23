@@ -232,12 +232,13 @@ int meminfo_dump_to_writer(meminfo_writer *w, zend_execute_data *start_frame, in
 
     bailed_out = meminfo_dump_walk_guarded(&ctx, start_frame, include_global_symbol_table);
 
+    // In increasing order of precedence: a failed write outranks a cut-short walk.
+    status = MEMINFO_DUMP_COMPLETE;
+    if (meminfo_aborted(&ctx)) {
+        status = MEMINFO_DUMP_INCOMPLETE;
+    }
     if (w->err) {
         status = MEMINFO_DUMP_WRITE_FAILED;
-    } else if (meminfo_aborted(&ctx)) {
-        status = MEMINFO_DUMP_INCOMPLETE;
-    } else {
-        status = MEMINFO_DUMP_COMPLETE;
     }
 
     meminfo_context_free(&ctx);
@@ -259,20 +260,23 @@ int meminfo_dump_to_writer(meminfo_writer *w, zend_execute_data *start_frame, in
 MEMINFO_HIDDEN void meminfo_visit_exec_frame(meminfo_context *ctx, zend_execute_data *start_frame)
 {
     zend_execute_data *exec_frame;
+    zend_op_array *op_array;
+    // last_var is a signed int in every supported version, and
+    // ZEND_CALL_VAR_NUM casts its index to int as well.
+    int i;
 
     char frame_label[500];
-    exec_frame = start_frame;
 
-    while (exec_frame && !meminfo_aborted(ctx)) {
+    for (exec_frame = start_frame; exec_frame && !meminfo_aborted(ctx); exec_frame = exec_frame->prev_execute_data) {
         // Internal frames (a call into a C function) declare no PHP variables.
         // Visiting them would attribute the variables of the surrounding user
         // function to the internal call, e.g. "outerVar@array_map()".
         if (!exec_frame->func || !ZEND_USER_CODE(exec_frame->func->common.type)) {
-            goto handle_next;
+            continue;
         }
 
         if (meminfo_visit_item(&ctx->visited_items, exec_frame)) {
-            goto handle_next;
+            continue;
         }
 
         // A frame with nothing below it is the main script — or the first
@@ -299,24 +303,19 @@ MEMINFO_HIDDEN void meminfo_visit_exec_frame(meminfo_context *ctx, zend_execute_
             if (exec_frame->symbol_table) {
                 meminfo_browse_zvals_from_symbol_table(ctx, frame_label, exec_frame->symbol_table);
             }
-        } else {
-            // Read the compiled variables straight out of the frame. Calling
-            // zend_rebuild_symbol_table() instead would allocate a table per
-            // frame and leave ZEND_CALL_HAS_SYMBOL_TABLE set on the process
-            // being inspected, which the dump must not do.
-            zend_op_array *op_array = &exec_frame->func->op_array;
-            // last_var is a signed int in every supported version, and
-            // ZEND_CALL_VAR_NUM casts its index to int as well.
-            int i;
-
-            for (i = 0; i < op_array->last_var; i++) {
-                meminfo_zval_dump(ctx, frame_label, ZSTR_VAL(op_array->vars[i]), ZSTR_LEN(op_array->vars[i]),
-                    ZEND_CALL_VAR_NUM(exec_frame, i));
-            }
+            continue;
         }
 
-handle_next:
-        exec_frame = exec_frame->prev_execute_data;
+        // Read the compiled variables straight out of the frame. Calling
+        // zend_rebuild_symbol_table() instead would allocate a table per
+        // frame and leave ZEND_CALL_HAS_SYMBOL_TABLE set on the process
+        // being inspected, which the dump must not do.
+        op_array = &exec_frame->func->op_array;
+
+        for (i = 0; i < op_array->last_var; i++) {
+            meminfo_zval_dump(ctx, frame_label, ZSTR_VAL(op_array->vars[i]), ZSTR_LEN(op_array->vars[i]),
+                ZEND_CALL_VAR_NUM(exec_frame, i));
+        }
     }
 }
 
@@ -678,16 +677,14 @@ void meminfo_build_frame_label(char* frame_label, int frame_label_len, zend_exec
 
     object = Z_OBJ(frame->This);
     ptr = frame->prev_execute_data;
+    func = NULL;
+    function_name = NULL;
 
     if (frame->func) {
         func = frame->func;
 
 #if PHP_VERSION_ID >= 80000
-        if (func->common.function_name) {
-            function_name = ZSTR_VAL(func->common.function_name);
-        } else {
-            function_name = NULL;
-        }
+        function_name = func->common.function_name ? ZSTR_VAL(func->common.function_name) : NULL;
 #else
         function_name = (func->common.scope &&
                          func->common.scope->trait_aliases) ?
@@ -696,9 +693,6 @@ void meminfo_build_frame_label(char* frame_label, int frame_label_len, zend_exec
             (func->common.function_name ?
                 ZSTR_VAL(func->common.function_name) : NULL);
 #endif
-    } else {
-        func = NULL;
-        function_name = NULL;
     }
 
     if (function_name) {

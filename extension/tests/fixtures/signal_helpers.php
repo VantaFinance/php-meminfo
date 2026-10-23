@@ -73,13 +73,33 @@ function meminfo_test_remove_dir($dir)
     foreach (glob($dir . '/*') as $entry) {
         if (is_dir($entry) && !is_link($entry)) {
             meminfo_test_remove_dir($entry);
-        } else {
-            @unlink($entry);
+            continue;
         }
+
+        @unlink($entry);
     }
 
     @chmod($dir, 0700);
     @rmdir($dir);
+}
+
+/**
+ * SIGURG, whose number differs between Linux (23) and macOS/BSD (16), for
+ * builds without ext-pcntl constants.
+ *
+ * @return int
+ */
+function meminfo_test_default_signal()
+{
+    if (defined('SIGURG')) {
+        return SIGURG;
+    }
+
+    if (stripos(PHP_OS, 'Darwin') === 0 || stripos(PHP_OS, 'BSD') !== false) {
+        return 16;
+    }
+
+    return 23;
 }
 
 /**
@@ -96,13 +116,7 @@ function meminfo_test_remove_dir($dir)
 function meminfo_test_raise_signal($signal = null)
 {
     if ($signal === null) {
-        if (defined('SIGURG')) {
-            $signal = SIGURG;
-        } elseif (stripos(PHP_OS, 'Darwin') === 0 || stripos(PHP_OS, 'BSD') !== false) {
-            $signal = 16;
-        } else {
-            $signal = 23;
-        }
+        $signal = meminfo_test_default_signal();
     }
 
     if (function_exists('posix_kill')) {

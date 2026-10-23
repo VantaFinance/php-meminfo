@@ -100,15 +100,24 @@ function repro_nest($depth, $count)
     return $v1;
 }
 
+if (!in_array($mode, array('objects', 'frames', 'limit'), true)) {
+    fwrite(STDERR, "usage: memory.php objects|frames|limit [count]\n");
+    exit(2);
+}
+
 if ($mode === 'objects') {
     $objects = array();
     for ($i = 0; $i < $count; $i++) {
         $objects[] = new ReproDeclared();
     }
     repro_measure('objects', $count);
-} elseif ($mode === 'frames') {
+}
+
+if ($mode === 'frames') {
     repro_nest($count, $count);
-} elseif ($mode === 'limit') {
+}
+
+if ($mode === 'limit') {
     // What is left of memory_limit has to be enough: a writer that allocates
     // per object cannot dump a process that is already near its ceiling, which
     // is exactly when a dump is wanted.
@@ -126,7 +135,4 @@ if ($mode === 'objects') {
 
     printf("limit objects=%d completed dump_bytes=%d\n", $count, filesize($dumpFile));
     unlink($dumpFile);
-} else {
-    fwrite(STDERR, "usage: memory.php objects|frames|limit [count]\n");
-    exit(2);
 }
