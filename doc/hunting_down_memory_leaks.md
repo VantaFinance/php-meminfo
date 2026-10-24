@@ -198,20 +198,58 @@ Then take the two dumps again and load them as before. **Growth** should no long
 should no longer show the dispatcher retaining most of the dump. If something else now grows, that is
 the next leak — repeat from step 1.
 
+Faster ways in
+--------------
+
+The steps above work on any dump. With a newer extension and UI, these shortcuts often get you to the
+holder in one click:
+
+- **Findings first.** The Findings view lists what usually means a leak, with what to check next.
+  For example: "array `Dispatcher::listeners` keeps 4 000 items alive, none of them big" (an
+  accumulation point), or "2 000 closures from `OrderService.php:88` are alive" (listeners never
+  removed). Duplicate strings show only in dumps taken with `string_hashes`, and unreachable cycles
+  only with `unreachable`.
+- **Three dumps instead of two.** `dump-meminfo <pid> --count=3 --interval=2m`, then open the three
+  files together. Growth lists the objects created between the first two dumps and still alive in
+  the third, and groups them by the path that holds them. Temporaries of the second dump are gone by
+  the third, so what is left is what the work between them left behind.
+- **How held.** On a class row of Leak suspects, or in the Inspector, "How held" groups the instances
+  by the shape of their path from a root. A thousand leaked `Order`s fall into one or two groups, one
+  per place in the code that keeps them.
+- **Ignore what you know.** If a cache or the logger hides the real holder, "Ignore…" excludes it and
+  everything is recomputed. The filter is kept in the URL.
+- **Dump between jobs.** With `meminfo.dump_defer=1` and `meminfo_dump_if_requested()` in the worker
+  loop, dumps contain no half-finished job, so Growth is cleaner
+  ([recipes](process_dump.md#dumping-at-a-quiet-point-of-a-worker)).
+- **Generations.** Call `meminfo_mark()` after each job (or set `meminfo.auto_mark=1`). The
+  "Objects by generation" table then shows classes whose old generations stay populated.
+- **Where it was created.** With `meminfo.track_allocations=1`, Leak suspects groups retained memory
+  by the line of the `new` and by Composer package.
+- **Histograms for production.** `meminfo_histogram()` written to a file every few minutes costs
+  almost nothing. Open the files together ("Open histograms…") to see the classes whose count only
+  goes up.
+- **In CI.** `node ui/dist-report/cli.js after.json --baseline=before.json --max-growth=1000` fails
+  the build when a class grows too much. See the README.
+- **Try it all on one dump.** [`leaky_worker.php`](leaky_worker.php) leaks in every way the findings
+  look for, and its header shows how to take a dump of any size from it.
+
 Pitfalls
 --------
 
-- **Retained sizes are estimates.** Item sizes are the extension's estimates of the zvals and
-  structures it sees, not allocator truth; compare them with each other, not with `memory_usage`.
-  An object first reached from a function's local may also appear without its later holders (a
-  global or a static that also holds it emits no item of its own), so its retainer can be misplaced.
+- **Retained sizes are relative.** Item sizes are the allocations the extension sees: an object's
+  struct, an array's slots and keys, a string's bytes. That is not allocator truth, so compare them
+  with each other, not with `memory_usage`. Dumps from older extensions use rougher estimates, and
+  the UI says so. An object first reached from a function's local may also appear without its later
+  holders (a global or a static that also holds it emits no item of its own), so its retainer can be
+  misplaced.
 - **Memory outside PHP values is not in the dump.** Compiled code, the engine's own structures and
   buffers held by extensions (unfetched PDO/mysqli result sets, images in GD/Imagick) count towards
   `memory_get_usage()` but are not items. A large gap between **in use** in the top bar and what the
   dump accounts for points there.
-- **Unreachable cycles are not in the dump.** Objects that only refer to each other are garbage
-  waiting for the cycle collector; meminfo walks from the roots and never sees them. If memory drops
-  after `gc_collect_cycles()`, that was the cause, not a leak.
+- **Unreachable cycles are not in a default dump.** Objects that only refer to each other are garbage
+  waiting for the cycle collector, and the walk from the roots never reaches them. Dump with
+  `['unreachable' => true]` to list them under `<UNREACHABLE>`. If memory drops after
+  `gc_collect_cycles()`, that was the cause, not a leak.
 - **Idle processes do not serve signal dumps.** `dump-meminfo` is answered at the next opcode. An
   idle php-fpm worker has no handler installed, and a worker or event loop blocked in `sleep()`,
   `stream_select()` or another long internal call is woken by the signal but only dumps once it gets

@@ -10,7 +10,7 @@ How it works
 ------------
 
 ```bash
-$ dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force]
+$ dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force] [--count=N] [--interval=TIME]
 $ dump-meminfo 12345
 /tmp/meminfo-1834201933.json
 ```
@@ -21,6 +21,8 @@ $ dump-meminfo 12345
 | `--signal=SIG` | Signal to send, by name or number (default: this process's `meminfo.dump_signal`, normally `SIGURG`) |
 | `--timeout=SEC` | Seconds to wait for the dump to start (default: 30); once started, the wait continues while it grows |
 | `--force` | Send the signal even when the target does not appear to handle it |
+| `--count=N` | Take N dumps in a row and print one path per line, in order (default: 1) |
+| `--interval=TIME` | Wait between two dumps of a series: seconds, or a number with `s` or `m` (default: `60s`) |
 
 The only requirement on the target is that the extension is loaded. On receiving the signal it
 records the request and raises the engine's interrupt flag; the dump itself is written at the next
@@ -91,7 +93,9 @@ Settings
 | `meminfo.dump_signal` | `SIGURG` | Signal the process dumps on, by name (with or without the `SIG` prefix) or number. `0` or empty disables it. |
 | `meminfo.dump_dir` | system temp dir | Where dump files are written unless the trigger passes `--dir` / `'dir'`. Without it, the trigger looks in its own `meminfo.dump_dir`, so both sides must agree. On macOS the system temp dir (`$TMPDIR`) differs per user — set this explicitly there, or pass `--dir`. |
 
-Both are `PHP_INI_SYSTEM`, so they belong in `php.ini`:
+Both are `PHP_INI_SYSTEM`, so they belong in `php.ini`. The other settings are described below:
+[quiet points](#dumping-at-a-quiet-point-of-a-worker), [memory pressure](#dumping-on-memory-pressure),
+and the [README](../README.md#settings) for dump options, generations and allocation sites.
 
 ```ini
 extension=meminfo.so
@@ -178,9 +182,11 @@ Limitations
   its switches to the engine, which this setting enables. The parent of the dumping coroutine, while
   it is still inside `go()`, stays out of reach even then. OpenSwoole does not report its switches,
   and neither does PHP before 8.1, so there suspended coroutines are not in the dump.
-- **`spl_autoload_register()` callbacks are not dumped.** SPL keeps them private and the only way to
-  list them would be to call `spl_autoload_functions()`, which a dump must not do. Error, exception,
-  shutdown and output-buffer handlers are dumped under the frame `<CALLBACK>`.
+- **Registered callbacks are dumped under the frame `<CALLBACK>`.** Autoloaders and `pcntl_signal()`
+  handlers are kept in tables that SPL and pcntl keep private, so the dump lists them by calling
+  `spl_autoload_functions()` and `pcntl_signal_get_handler()`. These internal functions run no PHP
+  code, and they are not called within 256 KB of `memory_limit`. Not dumped: the context of
+  `libxml_set_streams_context()` and stream notification callbacks, which have no reader.
 - **`max_execution_time` is paused for the duration of the dump**, so dumping a large heap cannot time
   out the request it interrupts. FPM's `request_terminate_timeout` and the web server's
   `fastcgi_read_timeout` keep running, though — a dump big enough to outlast them will lose the worker.
@@ -221,6 +227,81 @@ everything the request had in memory. Treat it as sensitive:
   owned by the user the target runs as.
 - Nothing from the dump path ever reaches the target's own output. Failures go to its error log, so a
   dump cannot corrupt a response or trigger a user error handler.
+
+A series of dumps
+-----------------
+
+One dump shows what is in memory; three show what keeps growing. With `--count`, the command takes N
+dumps of the same process, `--interval` apart, and prints their paths in order. A failure stops the
+series; the dumps already taken stay.
+
+```bash
+$ dump-meminfo 12345 --count=3 --interval=5m
+```
+
+Open the files together in the browser UI. The newest is the dump; the others become its baselines.
+The Growth view then shows two things:
+
+- what grew at every step;
+- the objects created between the first two dumps that are still alive in the last: leak candidates,
+  grouped by where they are held.
+
+Dumping at a quiet point of a worker
+------------------------------------
+
+A signal is served at the next safe point. That is usually in the middle of a request or a job,
+so the dump also holds that job's temporaries, which blur a comparison of several dumps. With
+`meminfo.dump_defer=1`, the signal only records the request. The dump is written when the worker
+calls `meminfo_dump_if_requested()` between two jobs. The function returns the dump's path, or `null`
+when nothing is pending. The trigger waits as usual, within its `--timeout`. A request nobody served
+before the PHP request ends is logged.
+
+```ini
+meminfo.dump_defer = 1
+```
+
+| Runtime | Where to call `meminfo_dump_if_requested()` |
+|---|---|
+| RoadRunner | in the worker loop, after `$worker->respond(...)` |
+| FrankenPHP worker mode | after the handler in the `frankenphp_handle_request()` loop, next to `gc_collect_cycles()` |
+| Symfony Messenger | a listener on `WorkerRunningEvent` (fired between two messages) |
+| Laravel Octane | a listener on `RequestTerminated` (or `TaskTerminated` / `TickTerminated`) |
+| Plain CLI loop | at the end of each iteration |
+
+```php
+// RoadRunner
+while ($request = $worker->waitRequest()) {
+    $worker->respond($handler->handle($request));
+    meminfo_dump_if_requested();
+}
+```
+
+Dumping on memory pressure
+--------------------------
+
+A leak is often noticed only when the process dies on `memory_limit`. Two settings make the process
+dump itself:
+
+| Setting | When the dump is written |
+|---|---|
+| `meminfo.dump_on_limit=1` | When "Allowed memory size … exhausted" is raised. The dump is written before the fatal error ends the request, with the frames still in place. |
+| `meminfo.dump_threshold=512M` (or `80%`) | Once per request, at the next safe point after memory usage passes it. With `meminfo.dump_defer`, at the next `meminfo_dump_if_requested()`. |
+
+Both write to `meminfo.dump_dir`, under the same names and with the same `0600` permissions as signal
+dumps, and log the dump's path to the error log. The memory limit is lifted while the dump is
+written, as for a signal.
+
+The dump on `memory_limit` does not wait for `meminfo.dump_defer`: the fatal error ends the request
+right after it, so there is no quiet point left. It therefore holds the job that was running. Its
+header says `"trigger": "memory_limit"`, and the log line says so when `dump_defer` is on. The UI warns
+when such a dump, or one taken on a signal or a threshold without `dump_defer`, is part of a
+comparison. The threshold has no such limit: with `dump_defer` it waits for the next
+`meminfo_dump_if_requested()` (`"trigger": "threshold (deferred)"`).
+
+The threshold is checked on function calls through an observer, which is registered only when the
+setting is set. On PHP 8.0 and 8.1 the observer sees only calls to user functions; from 8.2 it sees
+internal calls too. Before 8.0 the setting is ignored. `dump_on_limit` works from PHP 7.1, like
+signal dumps.
 
 Containers
 ----------
