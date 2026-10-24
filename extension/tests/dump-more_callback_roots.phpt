@@ -26,7 +26,9 @@ Autoloaders, tick functions, header_register_callback() and the default stream c
     {
         $symbols = array();
         foreach ($items as $item) {
-            if ($item["is_root"] && $item["frame"] === $frame) {
+            // Extensions may add callbacks of their own (Swoole registers a shutdown function).
+            if ($item["is_root"] && $item["frame"] === $frame
+                && strpos($item["symbol_name"], "register_shutdown_function") !== 0) {
                 $symbols[] = $item["symbol_name"];
             }
         }
