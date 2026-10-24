@@ -23,6 +23,9 @@
 #include "php.h"
 #include "php_meminfo.h"
 #include "internal.h"
+#if PHP_VERSION_ID >= 80000
+#include "zend_observer.h"
+#endif
 #include "php_open_temporary_file.h"
 #include "php_globals.h"
 
@@ -340,9 +343,10 @@ static int meminfo_set_memory_limit(size_t limit)
 
 /**
  * Hand the written dump over by renaming it into place — or, when writing it
- * failed or it is incomplete, report that and remove it.
+ * failed or it is incomplete, report that and remove it. Returns 1 when the
+ * dump is in place.
  */
-static void meminfo_dump_file_finish(const char *request, const char *temp_path, const char *final_path, int write_errno, int status)
+static int meminfo_dump_file_finish(const char *request, const char *temp_path, const char *final_path, int write_errno, int status)
 {
     char message[MAXPATHLEN + 192];
     int saved_errno;
@@ -352,7 +356,7 @@ static void meminfo_dump_file_finish(const char *request, const char *temp_path,
             temp_path, strerror(write_errno));
         meminfo_report_dump_failure(request, message);
         unlink(temp_path);
-        return;
+        return 0;
     }
 
     if (status == MEMINFO_DUMP_INCOMPLETE) {
@@ -361,7 +365,7 @@ static void meminfo_dump_file_finish(const char *request, const char *temp_path,
             "meminfo: dump to %s is incomplete: out of memory for its bookkeeping", temp_path);
         meminfo_report_dump_failure(request, message);
         unlink(temp_path);
-        return;
+        return 0;
     }
 
     if (rename(temp_path, final_path) != 0) {
@@ -370,7 +374,10 @@ static void meminfo_dump_file_finish(const char *request, const char *temp_path,
             temp_path, strerror(saved_errno));
         meminfo_report_dump_failure(request, message);
         unlink(temp_path);
+        return 0;
     }
+
+    return 1;
 }
 
 /**
@@ -379,9 +386,10 @@ static void meminfo_dump_file_finish(const char *request, const char *temp_path,
  * Nothing here may reach the output of the process being dumped: a stream
  * notice or a user error handler firing in the middle of someone's response is
  * exactly the kind of interference this feature must not cause. Failures go to
- * the error log only.
+ * the error log only. On success, the path of the dump is copied to out_path
+ * when one is given.
  */
-static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id)
+static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, char *out_path, size_t out_size)
 {
     char final_path[MAXPATHLEN];
     char temp_path[MAXPATHLEN + 8];
@@ -496,6 +504,10 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id)
             // Should a fatal error still bail out of the walk, which frees its
             // own state, the file, the timer, the limit and the dumping flag
             // are put back here before the bailout goes on.
+            MEMINFO_G(dump_flags) = meminfo_dump_flags(NULL);
+            if (MEMINFO_G(auto_mark)) {
+                meminfo_mark();
+            }
             if (meminfo_dump_to_writer_guarded(writer, execute_data, 1, &status)) {
                 free(writer);
                 close(fd);
@@ -520,7 +532,9 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id)
                 write_errno = errno ? errno : EIO;
             }
 
-            meminfo_dump_file_finish(request, temp_path, final_path, write_errno, status);
+            if (meminfo_dump_file_finish(request, temp_path, final_path, write_errno, status) && out_path != NULL) {
+                snprintf(out_path, out_size, "%s", final_path);
+            }
         }
     }
 
@@ -541,9 +555,11 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id)
 }
 
 /**
- * Interrupt hook: runs between opcodes, with the engine in a consistent state.
+ * Serve a pending dump request, if there is one, at a point where the engine
+ * is consistent. Returns 1 when a request was served; out_path receives the
+ * dump's path when it was written.
  */
-static void meminfo_interrupt_handler(zend_execute_data *execute_data)
+static int meminfo_serve_dump_request(zend_execute_data *execute_data, char *out_path, size_t out_size)
 {
     if (MEMINFO_G(dump_requested) && !MEMINFO_G(dumping)) {
         int dump_id;
@@ -557,7 +573,16 @@ static void meminfo_interrupt_handler(zend_execute_data *execute_data)
 
         MEMINFO_G(dumping) = 1;
 
-        meminfo_dump_to_file(execute_data, dump_id);
+        // A request the code serves itself was waited for until a quiet point;
+        // one served by the interrupt hook lands wherever the code was.
+        if (MEMINFO_G(request_from_threshold)) {
+            MEMINFO_G(dump_trigger) = out_path != NULL ? "threshold (deferred)" : "threshold";
+        } else {
+            MEMINFO_G(dump_trigger) = out_path != NULL ? "deferred" : "signal";
+        }
+        MEMINFO_G(request_from_threshold) = 0;
+
+        meminfo_dump_to_file(execute_data, dump_id, out_path, out_size);
 
         // A request without an id that arrived during a dump without one is
         // most likely a resend of the request just served, and serving it
@@ -570,6 +595,181 @@ static void meminfo_interrupt_handler(zend_execute_data *execute_data)
         }
 
         MEMINFO_G(dumping) = 0;
+        return 1;
+    }
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Dumps on memory pressure (meminfo.dump_on_limit, meminfo.dump_threshold)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Dump on "Allowed memory size … exhausted", from the error notification,
+ * before the fatal error ends the request: the frames are still there, which a
+ * dump from a shutdown function after the bailout would no longer see. The
+ * allocator is past its limit at that point, which is safe for the walk — it
+ * allocates with malloc, and the limit is lifted for the dump anyway, as on a
+ * signal. Once per request; reported in the error log.
+ */
+static void meminfo_dump_on_limit(const char *message, size_t length)
+{
+    static const char prefix[] = "Allowed memory size of";
+    char path[MAXPATHLEN];
+    char log_message[MAXPATHLEN + 64];
+
+    if (!MEMINFO_G(dump_on_limit) || MEMINFO_G(limit_dumped) || MEMINFO_G(dumping)
+        || length < sizeof(prefix) - 1 || memcmp(message, prefix, sizeof(prefix) - 1) != 0) {
+        return;
+    }
+
+    MEMINFO_G(limit_dumped) = 1;
+    MEMINFO_G(dumping) = 1;
+    MEMINFO_G(dump_trigger) = "memory_limit";
+    path[0] = '\0';
+    meminfo_dump_to_file(EG(current_execute_data), 0, path, sizeof(path));
+    MEMINFO_G(dumping) = 0;
+
+    // meminfo.dump_defer cannot apply: the fatal error ends the request right
+    // after this, so there is no quiet point left to wait for. The header says
+    // "memory_limit" and the log says it, so a comparison treats this dump as
+    // one taken in the middle of the work.
+    if (path[0] != '\0') {
+        snprintf(log_message, sizeof(log_message), "meminfo: memory_limit reached, dump written to %s%s", path,
+            MEMINFO_G(dump_defer) ? " (in the middle of the work: meminfo.dump_defer cannot wait for a fatal error)" : "");
+        php_log_err(log_message);
+    }
+}
+
+#if PHP_VERSION_ID >= 80100
+static void meminfo_error_observer(int type, zend_string *file, uint32_t line, zend_string *message)
+{
+    (void) file;
+    (void) line;
+    if (type & E_ERROR) {
+        meminfo_dump_on_limit(ZSTR_VAL(message), ZSTR_LEN(message));
+    }
+}
+#elif PHP_VERSION_ID >= 80000
+static void meminfo_error_observer(int type, const char *file, uint32_t line, zend_string *message)
+{
+    (void) file;
+    (void) line;
+    if (type & E_ERROR) {
+        meminfo_dump_on_limit(ZSTR_VAL(message), ZSTR_LEN(message));
+    }
+}
+#else
+static void (*meminfo_previous_error_cb)(int type, const char *file, const uint32_t line, const char *format, va_list args);
+
+// Before 8.0 there are no error observers: zend_error_cb is wrapped. The
+// format string of the limit error starts with the same words as its message.
+static void meminfo_error_cb(int type, const char *file, const uint32_t line, const char *format, va_list args)
+{
+    if (type & E_ERROR) {
+        meminfo_dump_on_limit(format, strlen(format));
+    }
+    meminfo_previous_error_cb(type, file, line, format, args);
+}
+#endif
+
+#if PHP_VERSION_ID >= 80000
+/**
+ * The threshold in bytes for this request: "512M", "1G", "64K", a byte count,
+ * or a percentage of memory_limit ("80%"). 0 when unset or meaningless.
+ */
+static size_t meminfo_threshold_bytes(void)
+{
+    const char *setting = MEMINFO_G(dump_threshold);
+    size_t length;
+
+    if (setting == NULL || setting[0] == '\0') {
+        return 0;
+    }
+
+    length = strlen(setting);
+    if (setting[length - 1] == '%') {
+        zend_long percent = ZEND_STRTOL(setting, NULL, 10);
+
+        return PG(memory_limit) > 0 && percent > 0 ? (size_t) PG(memory_limit) / 100 * (size_t) percent : 0;
+    }
+
+    {
+        char *end = NULL;
+        unsigned long long value = strtoull(setting, &end, 10);
+
+        switch (end != NULL ? *end : '\0') {
+            case 'g': case 'G': value <<= 30; break;
+            case 'm': case 'M': value <<= 20; break;
+            case 'k': case 'K': value <<= 10; break;
+            default: break;
+        }
+
+        return (size_t) value;
+    }
+}
+
+/**
+ * Called on every function call while a threshold is set: one comparison.
+ * 8.0 and 8.1 observe calls of user functions only, 8.2 and later internal
+ * ones as well.
+ * Crossing it requests a dump the way a signal does, served at the next safe
+ * point (or by meminfo_dump_if_requested() with meminfo.dump_defer).
+ */
+static void meminfo_threshold_check(zend_execute_data *execute_data)
+{
+    size_t threshold;
+
+    (void) execute_data;
+    if (MEMINFO_G(threshold_crossed) || MEMINFO_G(dumping)) {
+        return;
+    }
+
+    // Parsed once per memory_limit, not on every call.
+    if (MEMINFO_G(threshold_limit_seen) != PG(memory_limit)) {
+        MEMINFO_G(threshold_limit_seen) = PG(memory_limit);
+        MEMINFO_G(threshold_bytes) = meminfo_threshold_bytes();
+    }
+    threshold = MEMINFO_G(threshold_bytes);
+    if (threshold == 0 || zend_memory_usage(0) < threshold) {
+        return;
+    }
+
+    MEMINFO_G(threshold_crossed) = 1;
+    // A request already pending (a trigger waiting for the dump it named by
+    // id) is served by the same dump; its id must not be replaced.
+    if (!MEMINFO_G(dump_requested)) {
+        MEMINFO_G(dump_id) = 0;
+        MEMINFO_G(request_from_threshold) = 1;
+    }
+    MEMINFO_G(dump_requested) = 1;
+#if PHP_VERSION_ID >= 80200
+    zend_atomic_bool_store_ex(&EG(vm_interrupt), true);
+#else
+    EG(vm_interrupt) = 1;
+#endif
+    php_log_err((char *) "meminfo: memory usage passed meminfo.dump_threshold, dumping");
+}
+
+static zend_observer_fcall_handlers meminfo_threshold_observer(zend_execute_data *execute_data)
+{
+    zend_observer_fcall_handlers handlers = { meminfo_threshold_check, NULL };
+
+    (void) execute_data;
+    return handlers;
+}
+#endif
+
+/**
+ * Interrupt hook: runs between opcodes, with the engine in a consistent state.
+ * With meminfo.dump_defer the request is left pending for
+ * meminfo_dump_if_requested().
+ */
+static void meminfo_interrupt_handler(zend_execute_data *execute_data)
+{
+    if (!MEMINFO_G(dump_defer)) {
+        meminfo_serve_dump_request(execute_data, NULL, 0);
     }
 
     // Timeouts and pcntl's signal dispatch run through the same hook.
@@ -634,9 +834,30 @@ MEMINFO_HIDDEN void meminfo_restore_signal_handler(void)
  */
 void meminfo_signal_module_startup(void)
 {
-    if (MEMINFO_G(dump_signal) != 0) {
+    int threshold = MEMINFO_G(dump_threshold) != NULL && MEMINFO_G(dump_threshold)[0] != '\0';
+
+    if (MEMINFO_G(dump_signal) != 0 || threshold) {
         meminfo_previous_interrupt_function = zend_interrupt_function;
         zend_interrupt_function = meminfo_interrupt_handler;
+    }
+
+    if (MEMINFO_G(dump_on_limit)) {
+#if PHP_VERSION_ID >= 80000
+        zend_observer_error_register(meminfo_error_observer);
+#else
+        meminfo_previous_error_cb = zend_error_cb;
+        zend_error_cb = meminfo_error_cb;
+#endif
+    }
+
+    // Registered only when a threshold is set: every function call then pays
+    // one comparison. Before 8.0 there is no observer to check it from.
+    if (threshold) {
+#if PHP_VERSION_ID >= 80000
+        zend_observer_fcall_register(meminfo_threshold_observer);
+#else
+        php_log_err((char *) "meminfo: meminfo.dump_threshold needs PHP 8.0 or later; it is ignored");
+#endif
     }
 }
 
@@ -648,6 +869,53 @@ void meminfo_signal_module_shutdown(void)
     if (zend_interrupt_function == meminfo_interrupt_handler) {
         zend_interrupt_function = meminfo_previous_interrupt_function;
     }
+#if PHP_VERSION_ID < 80000
+    if (zend_error_cb == meminfo_error_cb) {
+        zend_error_cb = meminfo_previous_error_cb;
+    }
+#endif
+}
+
+/**
+ * Log a deferred request nobody served before the request ended: the trigger
+ * waits for it until its timeout.
+ */
+MEMINFO_HIDDEN void meminfo_report_unserved_request(void)
+{
+    if (MEMINFO_G(dump_defer) && MEMINFO_G(dump_requested)) {
+        php_log_err((char *) "meminfo: a dump was requested but meminfo_dump_if_requested() was not called before the request ended (meminfo.dump_defer=1)");
+        MEMINFO_G(dump_requested) = 0;
+    }
 }
 
 #endif /* MEMINFO_HAVE_SIGNAL_DUMP */
+
+/**
+ * meminfo_dump_if_requested(): ?string
+ *
+ * With meminfo.dump_defer=1, a dump signal only records the request; a worker
+ * calls this between two jobs, where nothing of a job is left in memory, and
+ * the dump is written then, as on a signal. Returns the dump's path, or null
+ * when no dump was pending (or this build cannot serve one).
+ */
+PHP_FUNCTION(meminfo_dump_if_requested)
+{
+#if MEMINFO_HAVE_SIGNAL_DUMP
+    char path[MAXPATHLEN];
+    zend_execute_data *caller;
+#endif
+
+    if (zend_parse_parameters_none() == FAILURE) {
+        return;
+    }
+
+#if MEMINFO_HAVE_SIGNAL_DUMP
+    path[0] = '\0';
+    caller = EG(current_execute_data) ? EG(current_execute_data)->prev_execute_data : NULL;
+    if (meminfo_serve_dump_request(caller, path, sizeof(path)) && path[0] != '\0') {
+        RETURN_STRING(path);
+    }
+#endif
+
+    RETURN_NULL();
+}

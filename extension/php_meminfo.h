@@ -117,11 +117,69 @@ typedef struct {
  * next safe point in the VM, hence volatile sig_atomic_t: nothing else in a
  * handler is guaranteed to be observed correctly.
  */
+/* Options of a dump (meminfo_dump()'s array, or the ini defaults on a signal) */
+#define MEMINFO_DUMP_UNREACHABLE    (1 << 0)    /* objects alive but reached from no root */
+#define MEMINFO_DUMP_STRING_HASHES  (1 << 1)    /* a hash of strings of 32 bytes or more */
+
+/* One object store slot as meminfo_mark() last saw it (generations.c) */
+typedef struct {
+    zend_object *object;
+    zend_class_entry *ce;
+    uint32_t generation;
+} meminfo_generation_slot;
+
+/* Where an object was created, by handle (generations.c, meminfo.track_allocations) */
+typedef struct {
+    zend_object *object;
+    zend_class_entry *ce;
+    zend_string *file;
+    uint32_t line;
+} meminfo_site_slot;
+
 ZEND_BEGIN_MODULE_GLOBALS(meminfo)
     /* ini: signal name or number to dump on, "0" or empty to disable */
     char *dump_signal_setting;
     /* ini: directory for dump files, empty means the system temp directory */
     char *dump_dir;
+    /* ini: defaults of the dump options, for dumps taken on a signal */
+    zend_bool dump_unreachable;
+    zend_bool dump_string_hashes;
+
+    /* MEMINFO_DUMP_* flags of the dump being written */
+    int dump_flags;
+    /* what the dump being written was taken on, for the header: "call", "signal", … */
+    const char *dump_trigger;
+    /* the pending request comes from the threshold, not from a signal */
+    zend_bool request_from_threshold;
+    /* ini: every dump marks a new generation first */
+    zend_bool auto_mark;
+    /* ini: a dump signal waits for meminfo_dump_if_requested() */
+    zend_bool dump_defer;
+    /* ini: dump when memory_limit is reached, and once usage passes a threshold */
+    zend_bool dump_on_limit;
+    char *dump_threshold;
+    /* this request already dumped on the limit / on the threshold */
+    zend_bool limit_dumped;
+    zend_bool threshold_crossed;
+    /* dump_threshold in bytes, worked out for this memory_limit (it can change at runtime) */
+    size_t threshold_bytes;
+    zend_long threshold_limit_seen;
+    /* ini: record where objects are created ("new") */
+    zend_bool track_allocations;
+    /* the sites by handle; the last "new" not yet matched to its object */
+    meminfo_site_slot *sites;
+    uint32_t sites_capacity;
+    int pending_site_handle;
+    zend_string *pending_site_file;
+    uint32_t pending_site_line;
+    zend_class_entry *pending_site_ce;
+    /* the site table could not grow: logged once */
+    zend_bool sites_failed;
+
+    /* generations.c: the last mark (0: none this request) and the table by handle */
+    uint32_t epoch;
+    meminfo_generation_slot *generations;
+    uint32_t generations_capacity;
 
     /* dump_signal_setting resolved to a signal number, 0 when disabled */
     int dump_signal;
@@ -152,6 +210,9 @@ ZEND_EXTERN_MODULE_GLOBALS(meminfo)
 #define MEMINFO_G(v) ZEND_MODULE_GLOBALS_ACCESSOR(meminfo, v)
 
 PHP_FUNCTION(meminfo_dump);
+PHP_FUNCTION(meminfo_mark);
+PHP_FUNCTION(meminfo_histogram);
+PHP_FUNCTION(meminfo_dump_if_requested);
 
 #ifndef PHP_WIN32
 /**
