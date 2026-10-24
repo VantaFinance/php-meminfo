@@ -1,3 +1,39 @@
+# Unreleased
+
+## Added
+ - **Complete roots.** The dump now also reaches:
+   - what frames hold besides their variables: `$this`, the running closure, extra and internal-call
+     arguments, live temporaries and pending call arguments;
+   - lazy objects (8.4) and the callable and return value of fibers;
+   - class constants and enum cases;
+   - autoloaders, tick functions, `header_register_callback()`, the session save handler,
+     `pcntl_signal()` handlers, the libxml entity loader and the default stream context options;
+   - output buffers.
+ - **Options and functions.**
+   - `meminfo_dump($stream, ['unreachable' => true, 'string_hashes' => true])`;
+   - `meminfo_mark()` generations;
+   - `meminfo_histogram()`;
+   - `meminfo_dump_if_requested()` with `meminfo.dump_defer`;
+   - `meminfo.dump_on_limit`, `meminfo.dump_threshold` and `meminfo.track_allocations`;
+   - `dump-meminfo --count/--interval`.
+ - **New dump fields.**
+   - Header: process context (PHP version, SAPI, pid, time, `memory_limit`, RSS, GC counters, VM
+     stack, compiled classes and functions) and what the dump was taken on (`trigger`).
+   - Items: closure origin (`function`, `declared_at`), frame `line`, `resource_type`, array
+     `capacity`/`used`.
+ - **Browser UI.**
+   - Findings, "How held" (retainer clusters and merged paths), ignored holders with recomputation.
+   - Series and three-dump leak candidates, generations, allocation sites, histograms.
+ - **Headless report** for CI (`ui/report/cli.ts`, `npm run build:report`), and a dump-speed
+   benchmark with a CI threshold (`make bench-dump`, `make bench-compare`).
+
+## Changed
+ - **One item per allocation** (`identity_model: 2`): a string or array shared by many variables
+   is dumped once.
+ - **Sizes are the allocations items stand for** (`size_model: 2`): array slots and keys, property
+   tables, internal object structs. Scalars count 0.
+ - On a 2M-item graph, dumps are 7–20% faster and have 15% fewer items.
+
 # 0.1.0
 
 First release of the Vanta fork of [BitOne/php-meminfo](https://github.com/BitOne/php-meminfo)

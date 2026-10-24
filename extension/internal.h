@@ -174,6 +174,8 @@ typedef struct {
     meminfo_stack stack;
     int aborted;        /* an allocation outside the stack and the set failed */
     meminfo_gc_block *gc_blocks;    /* every get_gc() copy made so far, freed at the end */
+    zval call_results;  /* what meminfo_call_internal() returned, kept until the end; UNDEF when nothing was called */
+    uint32_t frame_line;    /* line of the frame whose roots are being written, 0 outside frames */
     /* The level meminfo_item_open() is filling, until it is pushed or closed.
      * Kept here rather than on the C stack so that what it already owns (the
      * slot array, a property table reference) can still be released after a
@@ -231,8 +233,21 @@ MEMINFO_HIDDEN int meminfo_level_is_pending(const meminfo_level *level);
 MEMINFO_HIDDEN void meminfo_visit_exec_frame(meminfo_context *ctx, zend_execute_data *start_frame);
 MEMINFO_HIDDEN int meminfo_dump_to_writer_guarded(meminfo_writer *w, zend_execute_data *start_frame, int include_global_symbol_table, int *status);
 
+/* generations.c */
+MEMINFO_HIDDEN uint32_t meminfo_mark(void);
+MEMINFO_HIDDEN uint32_t meminfo_object_generation(const zend_object *object);
+MEMINFO_HIDDEN void meminfo_generations_reset(void);
+/* sites.c */
+MEMINFO_HIDDEN void meminfo_sites_module_startup(void);
+MEMINFO_HIDDEN uint32_t meminfo_object_site(const zend_object *object, zend_string **file);
+MEMINFO_HIDDEN void meminfo_sites_reset(void);
+
+/* meminfo.c */
+MEMINFO_HIDDEN int meminfo_dump_flags(HashTable *options);
+
 /* items.c */
 MEMINFO_HIDDEN void meminfo_zval_dump(meminfo_context *ctx, char *frame_label, const char *symbol_name, size_t symbol_name_len, zval *zv);
+MEMINFO_HIDDEN void meminfo_raw_root_dump(meminfo_context *ctx, const char *frame_label, const char *symbol_name, const void *identity, const char *type, size_t size);
 
 /* fibers.c */
 #if PHP_VERSION_ID >= 80100
@@ -251,10 +266,12 @@ MEMINFO_HIDDEN int meminfo_request_file_name(char *buffer, size_t size, const ch
 #endif
 #if MEMINFO_HAVE_SIGNAL_DUMP
 MEMINFO_HIDDEN void meminfo_install_signal_handler(void);
+MEMINFO_HIDDEN void meminfo_report_unserved_request(void);
 MEMINFO_HIDDEN void meminfo_restore_signal_handler(void);
 #endif
 
 /* procinfo.c */
+MEMINFO_HIDDEN size_t meminfo_self_rss(void);
 #if !defined(PHP_WIN32)
 MEMINFO_HIDDEN uint64_t meminfo_now_usec(void);
 MEMINFO_HIDDEN void meminfo_sleep_usec(uint64_t usec);

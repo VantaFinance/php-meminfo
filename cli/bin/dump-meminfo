@@ -57,11 +57,16 @@ function dump_meminfo_usage()
         '                   Once it has started, the wait continues while it grows.',
         '  --force          Send the signal even when the target does not appear to',
         '                   handle it. May terminate a target that is not listening.',
+        '  --count=N        Take N dumps in a row, one path per line in order (default: 1).',
+        '                   Comparing three or more shows what keeps growing.',
+        '  --interval=TIME  Wait between two dumps of a series: seconds, or a number',
+        '                   with s or m (default: 60s)',
         '  -h, --help       Show this help',
         '',
         'Example:',
         '  dump-meminfo 12345',
         '  dump-meminfo 12345 --dir=/var/tmp --timeout=60',
+        '  dump-meminfo 12345 --count=3 --interval=5m',
         '',
         'Open the dump in the browser UI (nothing is uploaded):',
         '  https://vantafinance.github.io/php-meminfo/',
@@ -77,6 +82,8 @@ function dump_meminfo_parse($argv)
 {
     $pid = null;
     $options = array();
+    $dumps = 1;
+    $interval = 60;
 
     for ($i = 1, $count = count($argv); $i < $count; $i++) {
         $argument = $argv[$i];
@@ -99,6 +106,32 @@ function dump_meminfo_parse($argv)
 
         if (strpos($argument, '--signal=') === 0) {
             $options['signal'] = substr($argument, strlen('--signal='));
+            continue;
+        }
+
+        if (strpos($argument, '--count=') === 0) {
+            $value = substr($argument, strlen('--count='));
+
+            if (!preg_match('/^[0-9]+$/D', $value) || (int) $value < 1) {
+                dump_meminfo_write(STDERR, 'dump-meminfo: --count must be a positive integer');
+
+                return EXIT_USAGE;
+            }
+
+            $dumps = (int) $value;
+            continue;
+        }
+
+        if (strpos($argument, '--interval=') === 0) {
+            $value = substr($argument, strlen('--interval='));
+
+            if (!preg_match('/^([0-9]+)(s|m)?$/D', $value, $match)) {
+                dump_meminfo_write(STDERR, 'dump-meminfo: --interval must be seconds, like 30, 30s or 5m');
+
+                return EXIT_USAGE;
+            }
+
+            $interval = (int) $match[1] * (isset($match[2]) && $match[2] === 'm' ? 60 : 1);
             continue;
         }
 
@@ -143,7 +176,7 @@ function dump_meminfo_parse($argv)
         return EXIT_USAGE;
     }
 
-    return array('pid' => $pid, 'options' => $options);
+    return array('pid' => $pid, 'options' => $options, 'count' => $dumps, 'interval' => $interval);
 }
 
 /**
@@ -181,24 +214,42 @@ function dump_meminfo_main($argv)
         return EXIT_FAILED;
     }
 
-    // The exception message explains exactly which step failed and already
-    // names the function it came from. It belongs on stderr so that stdout
-    // stays parseable as nothing but the path.
-    try {
-        $path = meminfo_dump_process($parsed['pid'], $parsed['options']);
-    } catch (InvalidArgumentException $exception) {
-        // The call itself was wrong, which for a command is a usage error —
-        // the same exit code the argument parsing above returns.
-        dump_meminfo_write(STDERR, $exception->getMessage());
+    for ($index = 1; $index <= $parsed['count']; $index++) {
+        if ($index > 1) {
+            sleep($parsed['interval']);
+        }
 
-        return EXIT_USAGE;
-    } catch (Exception $exception) {
-        dump_meminfo_write(STDERR, $exception->getMessage());
+        $started = microtime(true);
 
-        return EXIT_FAILED;
+        // The exception message explains exactly which step failed and already
+        // names the function it came from. It belongs on stderr so that stdout
+        // stays parseable as nothing but the paths.
+        try {
+            $path = meminfo_dump_process($parsed['pid'], $parsed['options']);
+        } catch (InvalidArgumentException $exception) {
+            // The call itself was wrong, which for a command is a usage error —
+            // the same exit code the argument parsing above returns.
+            dump_meminfo_write(STDERR, $exception->getMessage());
+
+            return EXIT_USAGE;
+        } catch (Exception $exception) {
+            // A target that exits mid-series ends up here: the dumps already
+            // taken are printed, and the series stops.
+            if ($parsed['count'] > 1) {
+                dump_meminfo_write(STDERR, sprintf('dump-meminfo: dump %d of %d failed', $index, $parsed['count']));
+            }
+            dump_meminfo_write(STDERR, $exception->getMessage());
+
+            return EXIT_FAILED;
+        }
+
+        dump_meminfo_write(STDOUT, $path);
+
+        if ($parsed['count'] > 1) {
+            dump_meminfo_write(STDERR, sprintf('dump-meminfo: dump %d of %d written in %.1f s: %s',
+                $index, $parsed['count'], microtime(true) - $started, $path));
+        }
     }
-
-    dump_meminfo_write(STDOUT, $path);
 
     return EXIT_OK;
 }

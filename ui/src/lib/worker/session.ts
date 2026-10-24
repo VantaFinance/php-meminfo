@@ -1,7 +1,13 @@
 import { createLogger } from '../log'
 import { InvalidQueryError, query, ReferencePathFinder, referrers, summarize, topChildren } from '../engine/analyses/basic'
-import { compareWithBaseline, reduceToBaseline } from '../engine/analyses/diff'
+import { compareWithBaseline, growthSeries, leakCandidates, reduceToBaseline, type Baseline } from '../engine/analyses/diff'
 import { computeDominators, type Dominators } from '../engine/analyses/dominators'
+import { findFindings } from '../engine/analyses/findings'
+import { generationTable } from '../engine/analyses/generations'
+import { allocationSites } from '../engine/analyses/sites'
+import { histogramTrend, InvalidHistogramError, parseHistogram } from '../engine/analyses/histogram'
+import { ignoredEdges, InvalidFilterError, type RetainerFilter } from '../engine/analyses/filters'
+import { analyzeRetainers, instancesOf, type RetainerReport } from '../engine/analyses/retainers'
 import { buildPredecessors, rootDistances, type Predecessors, type RootDistances } from '../engine/analyses/graph'
 import { neighbourhoodSubgraph, pathsSubgraph } from '../engine/analyses/subgraph'
 import { dominatorChain, findSuspects, type SuspectReport } from '../engine/analyses/suspects'
@@ -11,9 +17,11 @@ import type { DumpStore } from '../engine/store'
 import type {
   EdgePage,
   ErrorKind,
+  FindingRow,
   ItemDetail,
   ItemRow,
   Phase,
+  RetainersResult,
   Request,
   ResponseMap,
   WorkerError,
@@ -34,7 +42,7 @@ export function toWorkerError(error: unknown): WorkerError {
   let kind: ErrorKind = 'internal'
   if (error instanceof DumpParseError) kind = 'invalid-dump'
   else if (error instanceof DumpTooLargeError) kind = 'too-large'
-  else if (error instanceof InvalidQueryError) kind = 'invalid-query'
+  else if (error instanceof InvalidQueryError || error instanceof InvalidFilterError || error instanceof InvalidHistogramError) kind = 'invalid-query'
   else if (error instanceof DOMException && error.name === 'AbortError') kind = 'cancelled'
   else if (error instanceof NoDumpError) kind = 'no-dump'
   return { kind, message }
@@ -57,6 +65,11 @@ export class DumpSession {
   private dominators: Dominators | null = null
   private suspects: SuspectReport | null = null
   private finder: ReferencePathFinder | null = null
+  /** Edges left out by the retainer filters (see filters.ts), null when none apply. */
+  private ignored: Uint8Array | null = null
+  private fileName = ''
+  /** Computed on the first request, dropped whenever the dominators are recomputed. */
+  private findings: FindingRow[] | null = null
 
   async handle<K extends Request['kind']>(request: Extract<Request, { kind: K }>, progress: ProgressSink): Promise<ResponseMap[K]> {
     return (await this.dispatch(request as Request, progress)) as ResponseMap[K]
@@ -72,10 +85,24 @@ export class DumpSession {
       }
       case 'analyze':
         return this.analyze(progress)
+      case 'setFilters':
+        return this.setFilters(request.filters, progress)
       case 'summary':
         return summarize(this.requireStore())
       case 'suspects':
         return this.suspectsResult(request.limit)
+      case 'findings':
+        return this.findingsResult()
+      case 'generations':
+        return generationTable(this.requireStore())
+      case 'sites':
+        return allocationSites(this.requireStore(), this.dominators)
+      case 'histograms':
+        return histogramTrend(
+          await Promise.all(request.files.map(async (file) => parseHistogram(await file.text(), file.name, file.lastModified))),
+        )
+      case 'retainers':
+        return this.retainers(request.key, request.isClass, request.skip)
       case 'topChildren': {
         const store = this.requireStore()
         return topChildren(store, Math.min(request.limit, MAX_PAGE)).map((row) => ({ ...this.row(row.index), uniqueKeys: row.uniqueKeys }))
@@ -97,6 +124,10 @@ export class DumpSession {
         return this.graph(request)
       case 'diff':
         return compareWithBaseline(request.baseline, this.requireStore())
+      case 'series':
+        return growthSeries(request.baselines, this.requireStore(), this.fileName)
+      case 'leaks':
+        return this.leaks(request.first, request.second)
       case 'find':
         return this.requireStore().findAddress(request.address.trim().toLowerCase())
     }
@@ -121,6 +152,8 @@ export class DumpSession {
     log.info('loading', { size: file.size })
     const store = await this.parse(file, progress)
     this.store = store
+    this.fileName = file.name
+    log.info('dump models', { identity: store.header.identity_model ?? 1, size: store.header.size_model ?? 1 })
     let roots = 0
     let totalSize = 0
     for (let i = 0; i < store.count; i++) {
@@ -143,7 +176,8 @@ export class DumpSession {
     const started = performance.now()
     progress('analyzing', 0, 1, store.count)
     this.ensureGraph()
-    this.dominators = computeDominators(store, this.preds!)
+    this.dominators = computeDominators(store, this.preds!, this.ignored)
+    this.findings = null
     this.suspects = findSuspects(store, this.dominators, MAX_PAGE)
     progress('analyzing', 1, 1, store.count)
     return {
@@ -151,6 +185,72 @@ export class DumpSession {
       sharedItems: this.suspects.sharedItems,
       analyzeMs: Math.round(performance.now() - started),
     }
+  }
+
+  private leaks(first: Baseline, second: Baseline): ResponseMap['leaks'] {
+    const store = this.requireStore()
+    this.ensureGraph()
+    const candidates = leakCandidates(first, second, store)
+    const byClass = new Map<string, { key: string; count: number; retained: number }>()
+    for (const index of candidates) {
+      const key = store.className(index) ?? store.typeName(index)
+      const entry = byClass.get(key) ?? { key, count: 0, retained: 0 }
+      entry.count++
+      if (this.dominators !== null && this.dominators.idom[index] !== -1) entry.retained += this.dominators.retained[index]!
+      byClass.set(key, entry)
+    }
+    return {
+      candidates: candidates.length,
+      byClass: [...byClass.values()].sort((a, b) => b.count - a.count),
+      retainers: this.retainersOf(analyzeRetainers(store, this.distances!, this.dominators, candidates, null)),
+    }
+  }
+
+  private retainers(key: string, isClass: boolean, skip: string): ResponseMap['retainers'] {
+    const store = this.requireStore()
+    let pattern: RegExp | null = null
+    if (skip.trim() !== '') {
+      try {
+        pattern = new RegExp(skip)
+      } catch (error) {
+        throw new InvalidQueryError(`invalid skip pattern: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    this.ensureGraph()
+    return this.retainersOf(analyzeRetainers(store, this.distances!, this.dominators, instancesOf(store, key, isClass), pattern))
+  }
+
+  private retainersOf(report: RetainerReport): RetainersResult {
+    return {
+      instances: report.instances,
+      clusters: report.clusters.map(({ representative, ...cluster }) => ({ ...cluster, item: this.row(representative) })),
+      merged: report.merged,
+      dominators: report.dominators.map(({ representative, ...group }) => ({
+        ...group,
+        item: representative < 0 ? null : this.row(representative),
+      })),
+    }
+  }
+
+  private findingsResult(): ResponseMap['findings'] {
+    if (this.suspects === null || this.dominators === null) {
+      throw new Error('the dump has not been analyzed yet')
+    }
+    this.findings ??= findFindings(this.requireStore(), this.dominators, this.suspects, this.preds!).map(({ index, ...finding }) => ({
+      ...finding,
+      item: index < 0 ? null : this.row(index),
+    }))
+    return this.findings
+  }
+
+  /** Apply retainer filters and recompute everything derived from reachability. */
+  private setFilters(filters: RetainerFilter[], progress: ProgressSink): ResponseMap['setFilters'] {
+    const store = this.requireStore()
+    this.ignored = ignoredEdges(store, filters)
+    this.distances = null
+    this.finder = null
+    log.info('filters set', { filters: filters.length })
+    return this.analyze(progress)
   }
 
   private suspectsResult(limit: number): ResponseMap['suspects'] {
@@ -186,6 +286,7 @@ export class DumpSession {
       referrers: this.preds!.predStart[index + 1]! - this.preds!.predStart[index]!,
     }
     if (view.handle !== undefined) detail.objectHandle = view.handle
+    if (view.extras !== undefined) detail.extras = view.extras
     if (this.suspects !== null) {
       detail.dominated = this.suspects.dominatedCounts[index]!
     }
@@ -221,7 +322,7 @@ export class DumpSession {
     const store = this.requireStore()
     this.checkIndex(index)
     this.ensureGraph()
-    this.finder ??= new ReferencePathFinder(store, this.preds!)
+    this.finder ??= new ReferencePathFinder(store, this.preds!, this.ignored)
     const { paths, rootsReaching } = this.finder.find(index, max)
     return {
       paths: paths.map((path) => ({
@@ -241,7 +342,7 @@ export class DumpSession {
 
     let subgraph
     if (request.mode === 'paths') {
-      this.finder ??= new ReferencePathFinder(store, this.preds!)
+      this.finder ??= new ReferencePathFinder(store, this.preds!, this.ignored)
       subgraph = pathsSubgraph(this.finder, this.dominators, request.index, maxNodes)
     } else {
       subgraph = neighbourhoodSubgraph(store, this.preds!, request.index, depth, maxNodes, request.direction)
@@ -280,6 +381,7 @@ export class DumpSession {
     if (view.className !== undefined) row.className = view.className
     if (view.symbol !== undefined) row.symbol = view.symbol
     if (view.frame !== undefined) row.frame = view.frame
+    if (view.extras?.declaredAt !== undefined) row.declaredAt = view.extras.declaredAt
     if (this.dominators !== null && this.dominators.idom[index] !== -1) row.retained = this.dominators.retained[index]!
     return row
   }
@@ -287,7 +389,7 @@ export class DumpSession {
   private ensureGraph(): void {
     const store = this.requireStore()
     this.preds ??= buildPredecessors(store)
-    this.distances ??= rootDistances(store)
+    this.distances ??= rootDistances(store, this.ignored)
   }
 
   private requireStore(): DumpStore {

@@ -8,11 +8,17 @@
   }
 
   let { row, address = false }: Props = $props()
+
+  /** "…/src/Listener.php:12" → "Listener.php:12": the full path is in the title. */
+  function shortLocation(location: string): string {
+    return location.slice(location.lastIndexOf('/') + 1)
+  }
 </script>
 
 <span class="label">
   <span class="kind">{row.className ?? row.type}</span>
   {#if row.symbol}<span class="symbol mono">{row.symbol}</span>{/if}
+  {#if row.declaredAt}<span class="symbol mono" title={row.declaredAt}>{shortLocation(row.declaredAt)}</span>{/if}
   {#if row.isRoot}<span class="badge root">root</span>{/if}
   {#if address}<span class="address mono">{row.address}</span>{/if}
 </span>

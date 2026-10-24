@@ -6,8 +6,11 @@ prints its path. It is a thin wrapper over `meminfo_dump_process()` of the
 
 ```bash
 composer require --dev vanta/dump-meminfo
-vendor/bin/dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force]
+vendor/bin/dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force] [--count=N] [--interval=TIME]
 ```
+
+`--count=3 --interval=5m` takes a series of dumps and prints their paths in order. Opened together in
+the browser UI, they show what grows at every step and the objects left behind between the first two.
 
 The command needs the meminfo extension loaded, and so does the process it dumps. Install the
 extension with [PIE](https://github.com/php/pie):

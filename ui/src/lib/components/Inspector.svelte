@@ -30,6 +30,9 @@
     Promise.all([client.request({ kind: 'item', index: target }), client.request({ kind: 'paths', index: target, max: 20 })])
       .then(([itemDetail, pathResult]) => {
         if (cancelled) return
+        if (itemDetail.row.type === 'resource' && itemDetail.extras?.resourceType === undefined) {
+          log.debug('resource of an unknown type (or an older dump)', { index: target })
+        }
         detail = itemDetail
         paths = pathResult
       })
@@ -64,6 +67,37 @@
   ]
 
   const total = $derived(app.analysis !== null && app.overview !== null ? app.overview.totalSize : 0)
+
+  // "Open in PhpStorm" links for declarations: off by default, remembered per
+  // browser. They only hand a local path to the IDE; nothing leaves the page.
+  const EDITOR_LINKS_KEY = 'meminfoEditorLinks'
+
+  function readEditorLinks(): boolean {
+    try {
+      return localStorage.getItem(EDITOR_LINKS_KEY) === '1'
+    } catch {
+      return false
+    }
+  }
+
+  let editorLinks = $state(readEditorLinks())
+
+  function setEditorLinks(enabled: boolean): void {
+    editorLinks = enabled
+    try {
+      localStorage.setItem(EDITOR_LINKS_KEY, enabled ? '1' : '0')
+    } catch {
+      // Storage unavailable (private window): the choice lasts for this page only.
+    }
+  }
+
+  /** "file:line" → a phpstorm:// URL, or null unless it ends in a line number (it comes from the dump). */
+  function editorUrl(location: string): string | null {
+    const colon = location.lastIndexOf(':')
+    const line = location.slice(colon + 1)
+    if (colon <= 0 || !/^\d+$/.test(line)) return null
+    return `phpstorm://open?file=${encodeURIComponent(location.slice(0, colon))}&line=${line}`
+  }
 </script>
 
 {#snippet itemLink(row: ItemRow, name: string | null)}
@@ -110,7 +144,29 @@
       <div><dt>Children</dt><dd>{formatCount(row.children)}</dd></div>
       <div><dt>Referenced by</dt><dd>{formatCount(detail.referrers)}</dd></div>
       {#if detail.objectHandle !== undefined}<div><dt>Object handle</dt><dd>#{detail.objectHandle}</dd></div>{/if}
+      {#if detail.extras?.line !== undefined}<div><dt>Frame at line</dt><dd>{detail.extras.line}</dd></div>{/if}
+      {#if detail.extras?.function}<div><dt>Function</dt><dd class="mono">{detail.extras.function}</dd></div>{/if}
+      {#if detail.extras?.declaredAt}
+        {@const url = editorLinks ? editorUrl(detail.extras.declaredAt) : null}
+        <div>
+          <dt>Declared at</dt>
+          <dd class="mono">{#if url}<a href={url}>{detail.extras.declaredAt}</a>{:else}{detail.extras.declaredAt}{/if}</dd>
+        </div>
+      {/if}
+      {#if detail.extras?.resourceType}<div><dt>Resource</dt><dd>{detail.extras.resourceType}</dd></div>{/if}
+      {#if detail.extras?.capacity !== undefined}
+        <div>
+          <dt>Slots used</dt>
+          <dd>{formatCount(detail.extras.used ?? 0)} of {formatCount(detail.extras.capacity)}</dd>
+        </div>
+      {/if}
     </dl>
+    {#if detail.extras?.declaredAt}
+      <label class="hint">
+        <input type="checkbox" checked={editorLinks} onchange={(event) => setEditorLinks(event.currentTarget.checked)} />
+        Link declarations to PhpStorm
+      </label>
+    {/if}
 
     {#if detail.dominatorChain.length > 1}
       <section>
@@ -125,6 +181,14 @@
                 {@render itemLink(link, null)}
               {/if}
               {#if link.retained !== undefined}<span class="muted num">{formatBytes(link.retained)}</span>{/if}
+              {#if link.index !== row.index}
+                <button
+                  type="button"
+                  class="button quiet"
+                  title="Recompute as if no {link.className ?? link.type} held anything"
+                  onclick={() => app.ignoreHolder(link.className ?? link.type)}>Ignore</button
+                >
+              {/if}
             </li>
           {/each}
         </ol>
@@ -136,6 +200,11 @@
         <div class="section-head">
           <h3>Reference paths from roots</h3>
           <button type="button" class="button quiet" onclick={() => app.openGraph(row.index)}>Show graph</button>
+        {#if row.className}
+          <button type="button" class="button quiet" onclick={() => row.className && app.showRetainers({ key: row.className, isClass: true })}>
+            How all {row.className} are held
+          </button>
+        {/if}
         </div>
         {#if paths.paths.length === 0}
           <p class="hint">No root reaches this item.</p>

@@ -38,7 +38,7 @@ MEMINFO_CONFIGURE_FLAGS := $(if $(MEMINFO_VERSION),--with-meminfo-version=$(MEMI
 EXT_SO      := $(EXT_DIR)/modules/meminfo.so
 # Same list as PHP_NEW_EXTENSION in extension/config.m4, plus the headers
 EXT_SOURCES := $(addprefix $(EXT_DIR)/,meminfo.c writer.c ptr_set.c traverse.c items.c fibers.c \
-                 signal.c procinfo.c trigger.c internal.h php_meminfo.h)
+                 signal.c procinfo.c trigger.c generations.c sites.c internal.h php_meminfo.h)
 
 # --- Test runner ---
 # REPORT_EXIT_STATUS=1 makes failing .phpt tests return a non-zero exit code.
@@ -117,7 +117,7 @@ test-one: build ## Run a single .phpt test (usage: make test-one TEST=tests/dump
 ##@ Code Quality
 
 # The standalone PHP scripts: examples, fixture generators and repro scripts.
-LINT_DIRS := doc $(EXT_DIR)/tests/fixtures ui/tests/fixtures tools/repro
+LINT_DIRS := doc $(EXT_DIR)/tests/fixtures ui/tests/fixtures tools/repro tools/bench
 
 .PHONY: lint
 lint: ## Syntax-check the repository's PHP scripts with php -l
@@ -137,6 +137,26 @@ dump-example: build ## Run doc/example.php to produce a sample dump at /tmp/php_
 	$(PHP) -d extension=$(CURDIR)/$(EXT_SO) doc/example.php
 	@echo "Dump written to $(EXAMPLE_DUMP)"
 	@echo "Open it in the browser UI: make ui-dev, or https://vantafinance.github.io/php-meminfo/"
+
+##@ Benchmark
+
+# tools/bench/: how fast meminfo_dump() writes a ~2M-item graph. PHP is started
+# with -n so an installed meminfo.so is not loaded twice; json is built in from 8.0.
+BENCH_ITEMS     ?= 2000000
+BENCH_RUNS      ?= 5
+BENCH_BASE      ?= origin/master
+BENCH_THRESHOLD ?= 15
+BENCH_ROUNDS    ?= 2
+
+.PHONY: bench-dump
+bench-dump: build ## Time meminfo_dump() of a large graph (usage: make bench-dump [BENCH_ITEMS=2000000] [BENCH_RUNS=5])
+	$(PHP) -n -d extension=$(CURDIR)/$(EXT_SO) -d memory_limit=-1 tools/bench/bench-dump.php \
+		--items=$(BENCH_ITEMS) --runs=$(BENCH_RUNS)
+
+.PHONY: bench-compare
+bench-compare: ## Fail when the dump is slower than BENCH_BASE by more than BENCH_THRESHOLD percent
+	BENCH_ITEMS=$(BENCH_ITEMS) BENCH_RUNS=$(BENCH_RUNS) BENCH_ROUNDS=$(BENCH_ROUNDS) PHP=$(PHP) PHPIZE=$(PHPIZE) PHP_CONFIG=$(PHP_CONFIG) \
+		tools/bench/compare.sh $(BENCH_BASE) $(BENCH_THRESHOLD)
 
 ##@ CI
 

@@ -10,17 +10,17 @@
 
   function pick(event: Event): void {
     const target = event.currentTarget as HTMLInputElement
-    const file = target.files?.[0]
+    const files = [...(target.files ?? [])]
     // Drop the input's reference at once: the File must not outlive the hand-off.
     target.value = ''
-    if (file !== undefined) app.open(file)
+    if (files.length > 0) app.openSeries(files)
   }
 
   function drop(event: DragEvent): void {
     event.preventDefault()
     dragging = false
-    const file = event.dataTransfer?.files[0]
-    if (file !== undefined) app.open(file)
+    const files = [...(event.dataTransfer?.files ?? [])]
+    if (files.length > 0) app.openSeries(files)
   }
 </script>
 
@@ -66,7 +66,7 @@
       <p class="drop-title">Drop a dump file here</p>
       <p class="drop-hint">or</p>
       <button type="button" class="button primary" onclick={() => input?.click()}>Open dump…</button>
-      <input bind:this={input} class="visually-hidden" type="file" accept=".json,application/json" onchange={pick} />
+      <input bind:this={input} class="visually-hidden" type="file" multiple accept=".json,application/json" onchange={pick} />
       <p class="privacy">The dump is read and analyzed in this browser. Nothing is uploaded.</p>
     </div>
   </section>

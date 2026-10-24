@@ -23,20 +23,27 @@
 #include "php.h"
 #include "php_meminfo.h"
 #include "internal.h"
+#include "zend_closures.h"
+#include "zend_generators.h"
+#include "php_memory_streams.h"
+#if PHP_VERSION_ID >= 80400
+#include "zend_lazy_objects.h"
+#endif
 
 /**
- * Write the "children" block of an item: one key -> child identifier pair per
- * entry of ht. The children themselves are visited later, by the traversal
- * loop in meminfo_zval_dump().
- */
-/**
- * The address a child is identified by in the dump.
+ * The address an item is identified by in the dump: one item per allocation.
  *
- * References and indirect slots are followed first, and an object is keyed by
- * its zend_object, so that several zvals pointing at the same object collapse
- * into one item.
+ * References and indirect slots are followed first. An object is keyed by its
+ * zend_object, a refcounted string or array by its zend_string / zend_array,
+ * so that every zval sharing one allocation (a string assigned to many
+ * variables, a copy-on-write array, a foreach copy) leads to the same item and
+ * its size is counted once. Values that are not refcounted (scalars, interned
+ * strings, immutable arrays) have no allocation of their own on the request
+ * heap and keep the address of the zval.
  */
-static const void *meminfo_child_identity(zval *value)
+static zend_always_inline int meminfo_hash_initialized(const HashTable *ht);
+
+static const void *meminfo_item_identity(zval *value)
 {
     if (Z_TYPE_P(value) == IS_INDIRECT) {
         value = Z_INDIRECT_P(value);
@@ -48,6 +55,18 @@ static const void *meminfo_child_identity(zval *value)
 
     if (Z_TYPE_P(value) == IS_OBJECT) {
         return (const void *) Z_OBJ_P(value);
+    }
+
+    if (!Z_REFCOUNTED_P(value)) {
+        return (const void *) value;
+    }
+
+    if (Z_TYPE_P(value) == IS_STRING) {
+        return (const void *) Z_STR_P(value);
+    }
+
+    if (Z_TYPE_P(value) == IS_ARRAY) {
+        return (const void *) Z_ARR_P(value);
     }
 
     return (const void *) value;
@@ -102,6 +121,11 @@ static void meminfo_children_close(meminfo_context *ctx, int first_child)
 
 static void meminfo_hash_write_entries(meminfo_context *ctx, HashTable *ht, zend_bool is_object, int *first_child);
 
+/**
+ * Write the "children" block of an item: one key -> child identifier pair per
+ * entry of ht. The children themselves are visited later, by the traversal
+ * loop in meminfo_zval_dump().
+ */
 static void meminfo_hash_write_children(meminfo_context *ctx, HashTable *ht, zend_bool is_object)
 {
     int first_child = 1;
@@ -125,7 +149,7 @@ static void meminfo_hash_write_entries(meminfo_context *ctx, HashTable *ht, zend
 
     zend_hash_internal_pointer_reset_ex(ht, &pos);
     while ((entry = zend_hash_get_current_data_ex(ht, &pos)) != NULL) {
-        const void *child = meminfo_child_identity(entry);
+        const void *child = meminfo_item_identity(entry);
 
         meminfo_child_entry_open(ctx, first_child);
 
@@ -331,7 +355,7 @@ static void meminfo_slots_write_entries(meminfo_context *ctx, meminfo_prop_slot 
     uint32_t i;
 
     for (i = 0; i < count; i++) {
-        const void *child = meminfo_child_identity(slots[i].value);
+        const void *child = meminfo_item_identity(slots[i].value);
 
         meminfo_child_entry_open(ctx, first_child);
 
@@ -340,6 +364,58 @@ static void meminfo_slots_write_entries(meminfo_context *ctx, meminfo_prop_slot 
         meminfo_child_entry_close(ctx, child);
     }
 }
+
+#if PHP_VERSION_ID >= 80400
+#define MEMINFO_OBJECT_IS_LAZY(zobj) zend_object_is_lazy(zobj)
+#else
+#define MEMINFO_OBJECT_IS_LAZY(zobj) 0
+#endif
+
+#if PHP_VERSION_ID >= 80100
+/**
+ * Add what a Fiber holds besides its frames to its "children" block: the
+ * callable it was created with, as "[callable]", until that callable returns,
+ * and its return value, as "[result]", once it has. Its get_gc() handler
+ * reports both but is not called (see below).
+ */
+static void meminfo_fiber_write_gc_entries(meminfo_context *ctx, zend_fiber *fiber, meminfo_level *level, int *first_child)
+{
+    static const char *const names[] = { "[callable]", "[result]" };
+    zval *values[2];
+    meminfo_gc_block *block;
+    uint32_t i;
+
+    values[0] = &fiber->fci.function_name;
+    values[1] = &fiber->result;
+
+    block = malloc(sizeof(meminfo_gc_block) + sizeof(zval));
+    if (block == NULL) {
+        ctx->aborted = 1;
+        return;
+    }
+
+    block->count = 0;
+    block->next = ctx->gc_blocks;
+    ctx->gc_blocks = block;
+
+    for (i = 0; i < 2; i++) {
+        if (!Z_REFCOUNTED_P(values[i])) {
+            continue;
+        }
+
+        ZVAL_COPY_VALUE(&block->values[block->count], values[i]);
+        meminfo_child_entry_open(ctx, first_child);
+        meminfo_write_raw(ctx->w, names[i], strlen(names[i]));
+        meminfo_child_entry_close(ctx, meminfo_item_identity(&block->values[block->count]));
+        block->count++;
+    }
+
+    if (block->count > 0) {
+        level->gc_values = block->values;
+        level->gc_count = block->count;
+    }
+}
+#endif
 
 /**
  * Add what an object holds outside its properties to its "children" block,
@@ -351,7 +427,11 @@ static void meminfo_slots_write_entries(meminfo_context *ctx, meminfo_prop_slot 
  * values and objects of other extensions expose that data only to the garbage
  * collector, through get_gc(). Objects using the standard handler have nothing
  * there that their properties do not already show, so it is not called for
- * them, nor for a Fiber, whose frames are walked as frames of their own.
+ * them — except lazy objects (8.4+), whose initializer and, once a proxy is
+ * initialized, real instance live outside the object and are reported by the
+ * standard handler without initializing anything. A Fiber's get_gc() is not
+ * called either: its frames are walked as frames of their own, and the rest is
+ * read by meminfo_fiber_write_gc_entries().
  *
  * get_gc() handlers are engine or extension code; none of them runs PHP code.
  * Entries from the returned table keep their keys (a closure's variable names);
@@ -364,11 +444,15 @@ static void meminfo_object_write_gc_entries(meminfo_context *ctx, zval *zv, Hash
     int n = 0;
     HashTable *gc_ht;
 
-    if (zobj->handlers->get_gc == NULL || zobj->handlers->get_gc == std_object_handlers.get_gc) {
+    if (zobj->handlers->get_gc == NULL) {
+        return;
+    }
+    if (zobj->handlers->get_gc == std_object_handlers.get_gc && !MEMINFO_OBJECT_IS_LAZY(zobj)) {
         return;
     }
 #if PHP_VERSION_ID >= 80100
     if (zobj->ce == zend_ce_fiber) {
+        meminfo_fiber_write_gc_entries(ctx, (zend_fiber *) zobj, level, first_child);
         return;
     }
 #endif
@@ -412,7 +496,7 @@ static void meminfo_object_write_gc_entries(meminfo_context *ctx, zval *zv, Hash
                 MEMINFO_WRITE_LIT(ctx->w, "[");
                 meminfo_write_int(ctx->w, (int64_t) k);
                 MEMINFO_WRITE_LIT(ctx->w, "]");
-                meminfo_child_entry_close(ctx, meminfo_child_identity(&block->values[k]));
+                meminfo_child_entry_close(ctx, meminfo_item_identity(&block->values[k]));
             }
 
             level->gc_values = block->values;
@@ -470,6 +554,41 @@ static zend_always_inline const meminfo_type_name *meminfo_type_name_of(zval *zv
 }
 
 /**
+ * Where a closure comes from: "function" (the method or function it wraps, or
+ * {closure}, with its scope) and, for user code, "declared_at" (file:line of
+ * the declaration). A listener left in a static array is a Closure among
+ * thousands; this is what points at the code that registered it.
+ */
+static void meminfo_closure_write_location(meminfo_writer *w, zval *zv)
+{
+#if PHP_VERSION_ID >= 80000
+    const zend_function *func = zend_get_closure_method_def(Z_OBJ_P(zv));
+#else
+    const zend_function *func = zend_get_closure_method_def(zv);
+#endif
+
+    if (func == NULL || func->common.function_name == NULL) {
+        return;
+    }
+
+    MEMINFO_WRITE_LIT(w, "        \"function\" : \"");
+    if (func->common.scope) {
+        meminfo_write_json_escaped_len(w, ZSTR_VAL(func->common.scope->name), ZSTR_LEN(func->common.scope->name));
+        MEMINFO_WRITE_LIT(w, "::");
+    }
+    meminfo_write_json_escaped_len(w, ZSTR_VAL(func->common.function_name), ZSTR_LEN(func->common.function_name));
+    MEMINFO_WRITE_LIT(w, "\",\n");
+
+    if (func->type == ZEND_USER_FUNCTION && func->op_array.filename) {
+        MEMINFO_WRITE_LIT(w, "        \"declared_at\" : \"");
+        meminfo_write_json_escaped_len(w, ZSTR_VAL(func->op_array.filename), ZSTR_LEN(func->op_array.filename));
+        MEMINFO_WRITE_LIT(w, ":");
+        meminfo_write_int(w, (int64_t) func->op_array.line_start);
+        MEMINFO_WRITE_LIT(w, "\",\n");
+    }
+}
+
+/**
  * The object part of an item: its class, handle and one "children" block for
  * its properties — read from the declared slots when the object has no
  * property table, from get_properties() otherwise — and what get_gc() exposes.
@@ -490,6 +609,29 @@ static void meminfo_item_write_object(meminfo_context *ctx, zval *zv, meminfo_le
     MEMINFO_WRITE_LIT(w, "\",\n        \"object_handle\" : \"");
     meminfo_write_int(w, (int64_t) (int) Z_OBJ_HANDLE_P(zv));
     MEMINFO_WRITE_LIT(w, "\",\n");
+
+    if (Z_OBJCE_P(zv) == zend_ce_closure) {
+        meminfo_closure_write_location(w, zv);
+    }
+
+    if (MEMINFO_G(track_allocations)) {
+        zend_string *file;
+        uint32_t line = meminfo_object_site(Z_OBJ_P(zv), &file);
+
+        if (file != NULL) {
+            MEMINFO_WRITE_LIT(w, "        \"site\" : \"");
+            meminfo_write_json_escaped_len(w, ZSTR_VAL(file), ZSTR_LEN(file));
+            MEMINFO_WRITE_LIT(w, ":");
+            meminfo_write_int(w, (int64_t) line);
+            MEMINFO_WRITE_LIT(w, "\",\n");
+        }
+    }
+
+    if (MEMINFO_G(epoch) > 0) {
+        MEMINFO_WRITE_LIT(w, "        \"generation\" : ");
+        meminfo_write_int(w, (int64_t) meminfo_object_generation(Z_OBJ_P(zv)));
+        MEMINFO_WRITE_LIT(w, ",\n");
+    }
 
     zend_object *zobj = Z_OBJ_P(zv);
     int first_child = 1;
@@ -561,6 +703,28 @@ static void meminfo_item_write_object(meminfo_context *ctx, zval *zv, meminfo_le
 }
 
 /**
+ * Strings shorter than this get no hash: a hash of a short value can be
+ * reversed by trying values, and the dump must not leak them that way.
+ */
+#define MEMINFO_HASHED_STRING_MIN 32
+
+/**
+ * Write "hash" for a string (option "string_hashes"), so that identical
+ * strings held apart can be found: the hash the engine already cached, or one
+ * computed without storing it in the string.
+ */
+static void meminfo_write_string_hash(meminfo_writer *w, zend_string *str)
+{
+    char hex[24];
+    zend_ulong hash = ZSTR_H(str) ? ZSTR_H(str) : zend_hash_func(ZSTR_VAL(str), ZSTR_LEN(str));
+    int len = snprintf(hex, sizeof(hex), "%016llx", (unsigned long long) hash);
+
+    MEMINFO_WRITE_LIT(w, "        \"hash\" : \"");
+    meminfo_write_raw(w, hex, (size_t) len);
+    MEMINFO_WRITE_LIT(w, "\",\n");
+}
+
+/**
  * Write one item and report what is left to visit underneath it.
  *
  * Returns 0 when the item had already been visited (or when the traversal has
@@ -602,9 +766,7 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, const char
         ZVAL_DEREF(zv);
     }
 
-    // Objects are identified by their zend_object, so that several zvals
-    // pointing at the same object collapse into one item.
-    item_ptr = Z_TYPE_P(zv) == IS_OBJECT ? (const void *) Z_OBJ_P(zv) : (const void *) zv;
+    item_ptr = meminfo_item_identity(zv);
 
     if (meminfo_visit_item(&ctx->visited_items, item_ptr)) {
         return 0;
@@ -625,6 +787,11 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, const char
     meminfo_write_int(w, (int64_t) meminfo_get_element_size(zv));
     MEMINFO_WRITE_LIT(w, "\",\n");
 
+    if ((MEMINFO_G(dump_flags) & MEMINFO_DUMP_STRING_HASHES) && Z_TYPE_P(zv) == IS_STRING
+        && Z_STRLEN_P(zv) >= MEMINFO_HASHED_STRING_MIN) {
+        meminfo_write_string_hash(w, Z_STR_P(zv));
+    }
+
     if (frame_label) {
         if (symbol_name) {
             MEMINFO_WRITE_LIT(w, "        \"symbol_name\" : \"");
@@ -635,8 +802,22 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, const char
         MEMINFO_WRITE_LIT(w, "        \"is_root\" : true,\n        \"frame\" : \"");
         meminfo_write_json_escaped(w, frame_label);
         MEMINFO_WRITE_LIT(w, "\"");
+        if (ctx->frame_line > 0) {
+            MEMINFO_WRITE_LIT(w, ",\n        \"line\" : ");
+            meminfo_write_int(w, (int64_t) ctx->frame_line);
+        }
     } else {
         MEMINFO_WRITE_LIT(w, "        \"is_root\" : false");
+    }
+
+    if (Z_TYPE_P(zv) == IS_RESOURCE) {
+        const char *resource_type = zend_rsrc_list_get_rsrc_type(Z_RES_P(zv));
+
+        if (resource_type) {
+            MEMINFO_WRITE_LIT(w, ",\n        \"resource_type\" : \"");
+            meminfo_write_json_escaped(w, resource_type);
+            MEMINFO_WRITE_LIT(w, "\"");
+        }
     }
 
     if (Z_TYPE_P(zv) == IS_OBJECT) {
@@ -645,6 +826,14 @@ static int meminfo_item_open(meminfo_context *ctx, char *frame_label, const char
     }
 
     if (Z_TYPE_P(zv) == IS_ARRAY) {
+        // Slots allocated and slots used (deleted ones included), for spotting
+        // arrays that grew and were emptied: the memory stays allocated.
+        if (Z_REFCOUNTED_P(zv) && meminfo_hash_initialized(Z_ARRVAL_P(zv))) {
+            MEMINFO_WRITE_LIT(w, ",\n        \"capacity\" : ");
+            meminfo_write_int(w, (int64_t) Z_ARRVAL_P(zv)->nTableSize);
+            MEMINFO_WRITE_LIT(w, ",\n        \"used\" : ");
+            meminfo_write_int(w, (int64_t) Z_ARRVAL_P(zv)->nNumUsed);
+        }
         MEMINFO_WRITE_LIT(w, ",\n");
         meminfo_hash_write_children(ctx, Z_ARRVAL_P(zv), 0);
 
@@ -752,33 +941,228 @@ MEMINFO_HIDDEN void meminfo_zval_dump(meminfo_context *ctx, char *frame_label, c
 }
 
 /**
- * Get size of an element
- *
- * @param zval *zv Zval of the element
- *
- * @return zend_ulong
+ * Whether a HashTable has its data block allocated yet.
  */
-zend_ulong meminfo_get_element_size(zval *zv)
+static zend_always_inline int meminfo_hash_initialized(const HashTable *ht)
 {
-    zend_ulong size;
+#if PHP_VERSION_ID >= 70400
+    return (HT_FLAGS(ht) & HASH_FLAG_UNINITIALIZED) == 0;
+#else
+    return (ht->u.flags & HASH_FLAG_INITIALIZED) != 0;
+#endif
+}
 
-    size = sizeof(zval);
+static zend_always_inline int meminfo_hash_packed(const HashTable *ht)
+{
+#if PHP_VERSION_ID >= 70300
+    return HT_IS_PACKED(ht);
+#else
+    return (ht->u.flags & HASH_FLAG_PACKED) != 0;
+#endif
+}
 
-    switch (Z_TYPE_P(zv)) {
-        case IS_STRING:
-            size += Z_STRLEN_P(zv);
-            break;
+/**
+ * Size of a refcounted string's allocation: header and characters, rounded as
+ * the allocator rounds small blocks.
+ */
+static zend_always_inline size_t meminfo_string_size(const zend_string *str)
+{
+    return ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(ZSTR_LEN(str)));
+}
 
-        // TODO: add size of the indexes
-        case IS_ARRAY:
-            size += sizeof(HashTable);
-            break;
+/**
+ * Size of a HashTable: its header, its data block (buckets, or zvals for a
+ * packed array from 8.2, plus the hash index) and a share of every
+ * non-interned string key — the whole key when only this table holds it, a
+ * 1/refcount part when it is shared, so a key used by many arrays is not
+ * counted many times over.
+ */
+static size_t meminfo_hash_size(const HashTable *ht)
+{
+    size_t size = sizeof(HashTable);
+    Bucket *bucket, *end;
 
-        // TODO: add size of the properties table, but without property content
-        case IS_OBJECT:
-            size += sizeof(zend_object);
-            break;
+    if (!meminfo_hash_initialized(ht)) {
+        return size;
+    }
+
+#if PHP_VERSION_ID >= 80200
+    if (meminfo_hash_packed(ht)) {
+        return size + HT_PACKED_SIZE(ht);
+    }
+#endif
+
+    size += HT_SIZE(ht);
+    if (meminfo_hash_packed(ht)) {
+        return size;
+    }
+
+    bucket = ht->arData;
+    end = bucket + ht->nNumUsed;
+    for (; bucket != end; bucket++) {
+        if (bucket->key == NULL || Z_TYPE(bucket->val) == IS_UNDEF || ZSTR_IS_INTERNED(bucket->key)) {
+            continue;
+        }
+        size += meminfo_string_size(bucket->key) / GC_REFCOUNT(bucket->key);
     }
 
     return size;
+}
+
+/**
+ * Size of a memory stream's content (php://memory, or php://temp while it is
+ * still below its limit and in memory), read without calling the stream.
+ */
+static size_t meminfo_memory_stream_content(php_stream *stream)
+{
+#if PHP_VERSION_ID >= 80100
+    zend_string *data;
+#else
+    size_t length = 0;
+#endif
+
+    if (stream->ops == &php_stream_temp_ops) {
+        // php_stream_temp_data starts with the inner stream in every version.
+        stream = stream->abstract ? *(php_stream **) stream->abstract : NULL;
+        if (stream == NULL) {
+            return 0;
+        }
+    }
+    if (stream->ops != &php_stream_memory_ops) {
+        return 0;
+    }
+
+#if PHP_VERSION_ID >= 80100
+    data = php_stream_memory_get_buffer(stream);
+    return data ? ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(ZSTR_LEN(data))) : 0;
+#else
+    php_stream_memory_get_buffer(stream, &length);
+    return length;
+#endif
+}
+
+/**
+ * What a stream resource holds besides the zend_resource: the php_stream, its
+ * read buffer and, for a memory stream, its content. 0 for other resources.
+ */
+static size_t meminfo_stream_size(zend_resource *resource)
+{
+    php_stream *stream;
+
+    if ((resource->type != php_file_le_stream() && resource->type != php_file_le_pstream()) || resource->ptr == NULL) {
+        return 0;
+    }
+
+    stream = (php_stream *) resource->ptr;
+
+    return sizeof(php_stream) + stream->readbuflen + meminfo_memory_stream_content(stream);
+}
+
+/**
+ * zend_closure as declared in Zend/zend_closures.c, the same in every
+ * supported version: only its size is used.
+ */
+typedef struct {
+    zend_object std;
+    zend_function func;
+    zval this_ptr;
+    zend_class_entry *called_scope;
+    void (*orig_internal_handler)(INTERNAL_FUNCTION_PARAMETERS);
+} meminfo_closure_layout;
+
+/**
+ * The struct an object's class allocates. Internal classes usually keep their
+ * own data before the zend_object, handlers->offset bytes of it; the engine's
+ * Closure, Generator and Fiber put the zend_object first and their data after.
+ */
+static size_t meminfo_object_struct_size(const zend_object *object)
+{
+    if (object->ce == zend_ce_closure) {
+        return sizeof(meminfo_closure_layout);
+    }
+    if (object->ce == zend_ce_generator) {
+        return sizeof(zend_generator);
+    }
+#if PHP_VERSION_ID >= 80100
+    if (object->ce == zend_ce_fiber) {
+        return sizeof(zend_fiber);
+    }
+#endif
+
+    return (size_t) object->handlers->offset + sizeof(zend_object);
+}
+
+/**
+ * Size of the allocation an item stands for (header "size_model" 2).
+ *
+ *  - object: the struct its class allocates (meminfo_object_struct_size(); a
+ *    closure is some 330 bytes) with the declared property slots, and the
+ *    property table when one is attached;
+ *  - refcounted array: meminfo_hash_size();
+ *  - refcounted string: header and characters;
+ *  - resource: the zend_resource;
+ *  - anything else: 0. Scalars live inside the storage of what holds them
+ *    (bucket, property slot, frame), interned strings and immutable arrays
+ *    outside the request heap.
+ */
+zend_ulong meminfo_get_element_size(zval *zv)
+{
+    zend_object *object;
+    size_t size;
+
+    if (!Z_REFCOUNTED_P(zv)) {
+        return 0;
+    }
+
+    switch (Z_TYPE_P(zv)) {
+        case IS_STRING:
+            return (zend_ulong) meminfo_string_size(Z_STR_P(zv));
+
+        case IS_ARRAY:
+            return (zend_ulong) meminfo_hash_size(Z_ARRVAL_P(zv));
+
+        case IS_OBJECT:
+            object = Z_OBJ_P(zv);
+            size = meminfo_object_struct_size(object) + zend_object_properties_size(object->ce);
+            if (object->properties != NULL) {
+                size += meminfo_hash_size(object->properties);
+            }
+            return (zend_ulong) size;
+
+        case IS_RESOURCE:
+            return (zend_ulong) (sizeof(zend_resource) + meminfo_stream_size(Z_RES_P(zv)));
+    }
+
+    return 0;
+}
+
+/**
+ * Write a root that is not a zval: memory PHP holds outside any value, such as
+ * an output buffer, as an item of the given type and size with no children.
+ * identity is the address of that memory.
+ */
+MEMINFO_HIDDEN void meminfo_raw_root_dump(meminfo_context *ctx, const char *frame_label, const char *symbol_name, const void *identity, const char *type, size_t size)
+{
+    meminfo_writer *w = ctx->w;
+
+    if (identity == NULL || meminfo_aborted(ctx) || meminfo_visit_item(&ctx->visited_items, identity)) {
+        return;
+    }
+
+    if (! ctx->first_element) {
+        MEMINFO_WRITE_LIT(w, "\n    },\n");
+    }
+    ctx->first_element = 0;
+
+    MEMINFO_WRITE_LIT(w, "    \"");
+    meminfo_write_ptr(w, identity);
+    MEMINFO_WRITE_LIT(w, "\" : {\n        \"type\" : \"");
+    meminfo_write_json_escaped(w, type);
+    MEMINFO_WRITE_LIT(w, "\",\n        \"size\" : \"");
+    meminfo_write_int(w, (int64_t) size);
+    MEMINFO_WRITE_LIT(w, "\",\n        \"symbol_name\" : \"");
+    meminfo_write_json_escaped(w, symbol_name);
+    MEMINFO_WRITE_LIT(w, "\",\n        \"is_root\" : true,\n        \"frame\" : \"");
+    meminfo_write_json_escaped(w, frame_label);
+    MEMINFO_WRITE_LIT(w, "\"");
 }

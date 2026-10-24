@@ -16,6 +16,9 @@ const log = createLogger('dominators')
  *
  * Sizes are the dump's estimates and some roots may be missing from the dump
  * (see the format notes), so retained sizes are relative, not exact.
+ *
+ * Edges flagged in `ignored` (see filters.ts) are left out, as if the holder
+ * did not reference the item: what else keeps it alive then shows.
  */
 export interface Dominators {
   /** Immediate dominator of each item; -1 when unreachable; the virtual root is `count`. */
@@ -28,7 +31,7 @@ export interface Dominators {
   order: Int32Array
 }
 
-export function computeDominators(store: DumpStore, preds: Predecessors): Dominators {
+export function computeDominators(store: DumpStore, preds: Predecessors, ignored: Uint8Array | null = null): Dominators {
   const started = performance.now()
   const n = store.count
   const root = n
@@ -67,8 +70,10 @@ export function computeDominators(store: DumpStore, preds: Predecessors): Domina
       const end = childStart[node + 1]!
       let edge = childStart[node]! + cursor[depth]!
       while (edge < end) {
-        const candidate = edgeTarget[edge++]!
-        if (candidate >= 0 && visited[candidate] === 0) {
+        const candidate = edgeTarget[edge]!
+        const skip = ignored !== null && ignored[edge] === 1
+        edge++
+        if (!skip && candidate >= 0 && visited[candidate] === 0) {
           next = candidate
           break
         }
@@ -93,7 +98,7 @@ export function computeDominators(store: DumpStore, preds: Predecessors): Domina
   // --- iterate to the fixed point -------------------------------------------
   const idom = allocate(Int32Array, n + 1, n).fill(-1)
   idom[root] = root
-  const { predStart, predSource } = preds
+  const { predStart, predSource, predEdge } = preds
 
   const intersect = (a: number, b: number): number => {
     while (a !== b) {
@@ -113,7 +118,7 @@ export function computeDominators(store: DumpStore, preds: Predecessors): Domina
       let candidate = store.isRoot(node) ? root : -1
       for (let p = predStart[node]!; p < predStart[node + 1]!; p++) {
         const pred = predSource[p]!
-        if (idom[pred] === -1) continue
+        if (idom[pred] === -1 || (ignored !== null && ignored[predEdge[p]!] === 1)) continue
         candidate = candidate === -1 ? pred : intersect(pred, candidate)
       }
       if (idom[node] !== candidate) {
