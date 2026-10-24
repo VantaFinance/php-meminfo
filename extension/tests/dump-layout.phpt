@@ -89,12 +89,12 @@ lines holding only a comma: 0
 unexpected indentation: none
 closes items and the document: yes
 valid JSON: yes
-scalar fields: type,size,symbol_name,is_root,frame
+scalar fields: type,size,symbol_name,is_root,frame,line
 size is a string: yes
 empty array children: []
 empty array written as {}: yes
 nested children: key,other
-object fields: type,size,symbol_name,is_root,frame,class,object_handle,children
+object fields: type,size,symbol_name,is_root,frame,line,class,object_handle,children
 object children: name,items
 empty object children: []
 static member: <CLASS_STATIC_MEMBER>

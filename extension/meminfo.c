@@ -36,6 +36,7 @@
 #if PHP_VERSION_ID >= 80000
 ZEND_BEGIN_ARG_INFO_EX(arginfo_meminfo_dump, 0, 0, 1)
     ZEND_ARG_INFO(0, output_stream)
+    ZEND_ARG_INFO(0, options)
 ZEND_END_ARG_INFO()
 
 // Always a string: every failure path throws instead of returning a value.
@@ -44,8 +45,20 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_meminfo_dump_process, 0, 1, IS_S
     ZEND_ARG_INFO(0, options)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_meminfo_mark, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_meminfo_histogram, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_meminfo_dump_if_requested, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
 const zend_function_entry meminfo_functions[] = {
     PHP_FE(meminfo_dump, arginfo_meminfo_dump)
+    PHP_FE(meminfo_mark, arginfo_meminfo_mark)
+    PHP_FE(meminfo_histogram, arginfo_meminfo_histogram)
+    PHP_FE(meminfo_dump_if_requested, arginfo_meminfo_dump_if_requested)
 #ifndef PHP_WIN32
     PHP_FE(meminfo_dump_process, arginfo_meminfo_dump_process)
 #endif
@@ -54,6 +67,9 @@ const zend_function_entry meminfo_functions[] = {
 #else
 const zend_function_entry meminfo_functions[] = {
     PHP_FE(meminfo_dump, NULL)
+    PHP_FE(meminfo_mark, NULL)
+    PHP_FE(meminfo_histogram, NULL)
+    PHP_FE(meminfo_dump_if_requested, NULL)
 #ifndef PHP_WIN32
     PHP_FE(meminfo_dump_process, NULL)
 #endif
@@ -72,7 +88,47 @@ PHP_INI_BEGIN()
         dump_signal_setting, zend_meminfo_globals, meminfo_globals)
     STD_PHP_INI_ENTRY("meminfo.dump_dir", "", PHP_INI_SYSTEM, OnUpdateString,
         dump_dir, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_BOOLEAN("meminfo.dump_unreachable", "0", PHP_INI_SYSTEM, OnUpdateBool,
+        dump_unreachable, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_BOOLEAN("meminfo.dump_string_hashes", "0", PHP_INI_SYSTEM, OnUpdateBool,
+        dump_string_hashes, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_BOOLEAN("meminfo.auto_mark", "0", PHP_INI_SYSTEM, OnUpdateBool,
+        auto_mark, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_BOOLEAN("meminfo.dump_defer", "0", PHP_INI_SYSTEM, OnUpdateBool,
+        dump_defer, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_BOOLEAN("meminfo.dump_on_limit", "0", PHP_INI_SYSTEM, OnUpdateBool,
+        dump_on_limit, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_ENTRY("meminfo.dump_threshold", "", PHP_INI_SYSTEM, OnUpdateString,
+        dump_threshold, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_BOOLEAN("meminfo.track_allocations", "0", PHP_INI_SYSTEM, OnUpdateBool,
+        track_allocations, zend_meminfo_globals, meminfo_globals)
 PHP_INI_END()
+
+/**
+ * Dump flags from the ini defaults, overridden by meminfo_dump()'s options
+ * ("unreachable", "string_hashes"; other keys are ignored).
+ */
+MEMINFO_HIDDEN int meminfo_dump_flags(HashTable *options)
+{
+    int flags = (MEMINFO_G(dump_unreachable) ? MEMINFO_DUMP_UNREACHABLE : 0)
+        | (MEMINFO_G(dump_string_hashes) ? MEMINFO_DUMP_STRING_HASHES : 0);
+    zval *option;
+
+    if (options == NULL) {
+        return flags;
+    }
+
+    option = zend_hash_str_find(options, "unreachable", sizeof("unreachable") - 1);
+    if (option != NULL) {
+        flags = zend_is_true(option) ? flags | MEMINFO_DUMP_UNREACHABLE : flags & ~MEMINFO_DUMP_UNREACHABLE;
+    }
+    option = zend_hash_str_find(options, "string_hashes", sizeof("string_hashes") - 1);
+    if (option != NULL) {
+        flags = zend_is_true(option) ? flags | MEMINFO_DUMP_STRING_HASHES : flags & ~MEMINFO_DUMP_STRING_HASHES;
+    }
+
+    return flags;
+}
 
 static PHP_GINIT_FUNCTION(meminfo)
 {
@@ -80,10 +136,18 @@ static PHP_GINIT_FUNCTION(meminfo)
     ZEND_TSRMLS_CACHE_UPDATE();
 #endif
     memset(meminfo_globals, 0, sizeof(*meminfo_globals));
+    meminfo_globals->threshold_limit_seen = ZEND_LONG_MIN;
 }
 
 static PHP_GSHUTDOWN_FUNCTION(meminfo)
 {
+    free(meminfo_globals->generations);
+    meminfo_globals->generations = NULL;
+    meminfo_globals->generations_capacity = 0;
+    free(meminfo_globals->sites);
+    meminfo_globals->sites = NULL;
+    meminfo_globals->sites_capacity = 0;
+
 #if PHP_VERSION_ID >= 80100
     free(meminfo_globals->suspended.slots);
     meminfo_globals->suspended.slots = NULL;
@@ -139,9 +203,21 @@ static PHP_MINIT_FUNCTION(meminfo)
     MEMINFO_G(dump_signal) = 0;
 #endif
 
+#if !MEMINFO_HAVE_SIGNAL_DUMP
+    // These dump from inside the process the same way a signal does: say so
+    // once at startup instead of ignoring them silently.
+    if (MEMINFO_G(dump_defer) || MEMINFO_G(dump_on_limit)
+        || (MEMINFO_G(dump_threshold) != NULL && MEMINFO_G(dump_threshold)[0] != '\0')) {
+        php_error_docref(NULL, E_WARNING,
+            "meminfo.dump_defer, meminfo.dump_on_limit and meminfo.dump_threshold need a build that can dump "
+            "on a signal (PHP 7.1 or later, non-ZTS, POSIX); they are ignored");
+    }
+#endif
+
 #if MEMINFO_HAVE_SIGNAL_DUMP
     meminfo_signal_module_startup();
 #endif
+    meminfo_sites_module_startup();
 
     return SUCCESS;
 }
@@ -170,6 +246,7 @@ static PHP_RINIT_FUNCTION(meminfo)
     MEMINFO_G(dump_requested) = 0;
     MEMINFO_G(dump_id) = 0;
     MEMINFO_G(dumping) = 0;
+    MEMINFO_G(request_from_threshold) = 0;
 
     meminfo_install_signal_handler();
 #endif
@@ -179,6 +256,16 @@ static PHP_RINIT_FUNCTION(meminfo)
 
 static PHP_RSHUTDOWN_FUNCTION(meminfo)
 {
+    meminfo_generations_reset();
+    meminfo_sites_reset();
+    MEMINFO_G(limit_dumped) = 0;
+    MEMINFO_G(threshold_crossed) = 0;
+    // Worked out again on the next check: memory_limit may differ in the next request.
+    MEMINFO_G(threshold_limit_seen) = ZEND_LONG_MIN;
+#if MEMINFO_HAVE_SIGNAL_DUMP
+    meminfo_report_unserved_request();
+#endif
+
 #if MEMINFO_HAVE_SIGNAL_DUMP
     meminfo_restore_signal_handler();
 #endif
@@ -202,6 +289,8 @@ static PHP_MINFO_FUNCTION(meminfo)
     php_info_print_table_row(2, "Copyright", MEMINFO_COPYRIGHT);
     php_info_print_table_row(2, "Signal dumps supported",
         MEMINFO_HAVE_SIGNAL_DUMP ? "yes" : "no (needs PHP 7.1+, non-ZTS, POSIX)");
+    php_info_print_table_row(2, "Deferred, memory_limit and threshold dumps",
+        MEMINFO_HAVE_SIGNAL_DUMP ? "yes" : "no (same requirements as signal dumps)");
 
     if (MEMINFO_G(dump_signal) != 0) {
         char signal_text[32];
@@ -375,6 +464,7 @@ static void meminfo_dump_target_close(meminfo_writer *w, php_stream *stream, FIL
 PHP_FUNCTION(meminfo_dump)
 {
     zval *zval_stream;
+    HashTable *options = NULL;
 
     php_stream *stream;
     meminfo_writer *writer;
@@ -385,7 +475,7 @@ PHP_FUNCTION(meminfo_dump)
 
     // No throw here: PHP 8 has already thrown a TypeError or ArgumentCountError
     // of its own by this point, and 7.x has emitted a warning.
-    if (zend_parse_parameters(ZEND_NUM_ARGS(), "r", &zval_stream) == FAILURE) {
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "r|h", &zval_stream, &options) == FAILURE) {
         return;
     }
 
@@ -418,6 +508,11 @@ PHP_FUNCTION(meminfo_dump)
     // A fatal error mid-walk (memory_limit in an object's handler) bails out
     // of the walk, which frees its own state; the writer and the spool file
     // are this function's to release before the bailout goes on.
+    MEMINFO_G(dump_flags) = meminfo_dump_flags(options);
+    MEMINFO_G(dump_trigger) = "call";
+    if (MEMINFO_G(auto_mark)) {
+        meminfo_mark();
+    }
     if (meminfo_dump_to_writer_guarded(writer, caller_frame, 1, &status)) {
         free(writer);
         if (spool != NULL) {

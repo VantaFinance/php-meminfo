@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { watchCsp } from './helpers'
 
@@ -55,6 +56,38 @@ test('opens a dump json_decode rejects (invalid UTF-8 in keys)', async ({ page }
   await page.goto('/')
   await page.locator('input[type=file]').first().setInputFiles(fixture('ui-only/invalid-utf8'))
   await expect(page.getByRole('heading', { name: 'Leak suspects' })).toBeVisible()
+})
+
+test('opens a dump from a link whose retainer filters are invalid, without them', async ({ page }) => {
+  const broken = encodeURIComponent(JSON.stringify([{ kind: 'holders', pattern: '(' }]))
+  await page.goto(`/#ignore=${broken}`)
+  await page.locator('input[type=file]').first().setInputFiles(fixture('parity/leak-after'))
+  await expect(page.getByRole('grid', { name: 'Biggest retainers' }).getByRole('row').nth(1)).toContainText('LeakyCache::requests')
+  await expect(page.getByRole('alert').filter({ hasText: 'filters of the link were ignored' })).toBeVisible()
+  expect(new URL(page.url()).hash).toBe('')
+})
+
+test('applies valid retainer filters from the link', async ({ page }) => {
+  const filters = encodeURIComponent(JSON.stringify([{ kind: 'holders', pattern: '^LeakyCache$' }]))
+  await page.goto(`/#ignore=${filters}`)
+  await page.locator('input[type=file]').first().setInputFiles(fixture('parity/leak-after'))
+  await expect(page.getByLabel('Ignored holders')).toContainText('holders /^LeakyCache$/')
+})
+
+test('a series whose newest dump fails to open leaves no baselines to the next dump', async ({ page }) => {
+  await page.goto('/')
+  // Same modification time: the order given decides, so the broken dump is the newest of the series.
+  // Were the order to flip, leak-before would open instead and the alert below would never show.
+  await page.locator('input[type=file]').first().setInputFiles([
+    { name: 'leak-before.json', mimeType: 'application/json', buffer: readFileSync(fixture('parity/leak-before')) },
+    { name: 'broken.json', mimeType: 'application/json', buffer: Buffer.from('{"items":{"0x10":{"type":') },
+  ])
+  await expect(page.getByRole('alert')).toContainText('broken.json could not be opened')
+
+  await page.locator('input[type=file]').first().setInputFiles(fixture('parity/leak-after'))
+  await expect(page.getByRole('grid', { name: 'Biggest retainers' }).getByRole('row').nth(1)).toContainText('LeakyCache::requests')
+  await page.getByRole('button', { name: /Growth/ }).click()
+  await expect(page.getByRole('button', { name: 'Choose baseline dump…' })).toBeVisible()
 })
 
 test('reports a malformed dump instead of failing silently', async ({ page }) => {

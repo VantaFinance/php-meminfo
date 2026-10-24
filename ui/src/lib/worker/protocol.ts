@@ -1,7 +1,13 @@
 import type { LogLevel } from '../log'
 import type { QueryFilter, SummaryRow } from '../engine/analyses/basic'
-import type { Baseline, GrowthRow } from '../engine/analyses/diff'
-import type { DumpHeader, StoreStats } from '../engine/store'
+import type { Baseline, GrowthRow, SeriesResult } from '../engine/analyses/diff'
+import type { Finding } from '../engine/analyses/findings'
+import type { MergedPathNode } from '../engine/analyses/retainers'
+import type { GenerationTable } from '../engine/analyses/generations'
+import type { HistogramTrend } from '../engine/analyses/histogram'
+import type { SitesReport } from '../engine/analyses/sites'
+import type { RetainerFilter } from '../engine/analyses/filters'
+import type { DumpHeader, ItemExtras, StoreStats } from '../engine/store'
 
 /**
  * Messages between the page and a dump worker.
@@ -15,6 +21,8 @@ import type { DumpHeader, StoreStats } from '../engine/store'
 /** One item as shown in a table. */
 export interface ItemRow {
   index: number
+  /** Closures from user code: "file:line" of the declaration. */
+  declaredAt?: string
   address: string
   type: string
   className?: string
@@ -79,6 +87,7 @@ export interface QueryPage {
 export interface ItemDetail {
   row: ItemRow
   objectHandle?: number
+  extras?: ItemExtras
   /** Dominated by no root but by several — data shared by several roots. */
   shared: boolean
   /** Items it dominates, itself included. */
@@ -88,6 +97,26 @@ export interface ItemDetail {
   /** Distance from the nearest root; -1 when no root reaches it. */
   distanceFromRoot: number
   referrers: number
+}
+
+/** A finding as the page shows it: the item to open resolved to a row. */
+export interface FindingRow extends Omit<Finding, 'index'> {
+  item: ItemRow | null
+}
+
+/** How the instances of a class or type are held (see engine/analyses/retainers). */
+export interface RetainersResult {
+  instances: number
+  clusters: Array<{ steps: string[]; count: number; retained: number; item: ItemRow }>
+  merged: MergedPathNode
+  dominators: Array<{ key: string; members: number; retained: number; item: ItemRow | null }>
+}
+
+/** Three-dump leak detection: objects that appeared between the two baselines and are still alive. */
+export interface LeaksResult {
+  candidates: number
+  byClass: Array<{ key: string; count: number; retained: number }>
+  retainers: RetainersResult
 }
 
 export interface EdgePage {
@@ -129,8 +158,14 @@ export type Request =
   | { kind: 'load'; file: File }
   | { kind: 'loadBaseline'; file: File }
   | { kind: 'analyze' }
+  | { kind: 'setFilters'; filters: RetainerFilter[] }
   | { kind: 'summary' }
   | { kind: 'suspects'; limit: number }
+  | { kind: 'findings' }
+  | { kind: 'generations' }
+  | { kind: 'sites' }
+  | { kind: 'histograms'; files: File[] }
+  | { kind: 'retainers'; key: string; isClass: boolean; skip: string }
   | { kind: 'topChildren'; limit: number }
   | { kind: 'query'; filters: QueryFilter[]; offset: number; limit: number }
   | { kind: 'item'; index: number }
@@ -139,14 +174,22 @@ export type Request =
   | { kind: 'paths'; index: number; max: number }
   | { kind: 'graph'; index: number; mode: GraphMode; depth: number; direction: GraphDirection; maxNodes: number }
   | { kind: 'diff'; baseline: Baseline }
+  | { kind: 'series'; baselines: Baseline[] }
+  | { kind: 'leaks'; first: Baseline; second: Baseline }
   | { kind: 'find'; address: string }
 
 export interface ResponseMap {
   load: Overview
   loadBaseline: Baseline
   analyze: Analysis
+  setFilters: Analysis
   summary: SummaryRow[]
   suspects: SuspectsResult
+  findings: FindingRow[]
+  generations: GenerationTable | null
+  sites: SitesReport | null
+  histograms: HistogramTrend
+  retainers: RetainersResult
   topChildren: TopChildrenRowView[]
   query: QueryPage
   item: ItemDetail
@@ -155,6 +198,8 @@ export interface ResponseMap {
   paths: PathsResult
   graph: GraphResult
   diff: GrowthRow[]
+  series: SeriesResult
+  leaks: LeaksResult
   find: number
 }
 

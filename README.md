@@ -133,12 +133,21 @@ extension=meminfo.so
 
 ### Settings
 
-Both settings are `PHP_INI_SYSTEM` and only matter for [dumping a running process](#dumping-a-running-process):
+All settings are `PHP_INI_SYSTEM`. All are off by default except the dump signal. The signal,
+deferred, `memory_limit` and threshold dumps need the same build as signal dumps: PHP 7.1 or later,
+non-ZTS, POSIX. Elsewhere they are ignored with a warning at startup.
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `meminfo.dump_signal` | `SIGURG` | Signal the process dumps on, by name or number. `0` or empty disables it. |
 | `meminfo.dump_dir` | system temp dir | Where dumps are written unless the trigger passes `--dir`. |
+| `meminfo.dump_defer` | `0` | A dump signal only records the request; the dump is written when the code calls `meminfo_dump_if_requested()` (between two jobs of a worker). |
+| `meminfo.dump_on_limit` | `0` | Write a dump when `memory_limit` is reached, before the fatal error ends the request. |
+| `meminfo.dump_threshold` | empty | Write one dump per request once memory usage passes it: `512M`, `1G`, or `80%` of `memory_limit` (PHP 8.0+). |
+| `meminfo.dump_unreachable` | `0` | Default of the `unreachable` dump option, for dumps taken on a signal or a limit. |
+| `meminfo.dump_string_hashes` | `0` | Default of the `string_hashes` dump option, likewise. |
+| `meminfo.auto_mark` | `0` | Every dump starts a new [generation](#generations-and-histograms) first. |
+| `meminfo.track_allocations` | `0` | Record the line of the `new` that created each object. It costs about 6 ns per `new`, and the opcache JIT does not run while it is on. |
 
 `php -i | grep meminfo` shows what a build resolved. Details, and why `SIGURG`, are in
 [Dumping a running process](doc/process_dump.md#settings).
@@ -156,6 +165,30 @@ This writes a dump of the PHP memory, as JSON, to the given stream: a file, or `
 throws `RuntimeException` when the stream cannot be written to, or when the dump is incomplete. [`doc/example.php`](doc/example.php)
 is a minimal script (`make dump-example` runs it).
 
+Two options, both off by default:
+
+```php
+meminfo_dump($stream, [
+    'unreachable'   => true, // objects still alive that no root reaches: uncollected cycles, objects held by C code
+    'string_hashes' => true, // a hash of each string of 32 bytes or more, to find duplicates (shorter ones are never hashed)
+]);
+```
+
+### Generations and histograms
+
+```php
+meminfo_mark();                          // objects alive now are generation 1; objects created later are newer
+// … run the job …
+meminfo_dump($stream);                   // every object carries the generation it was first seen in
+
+$histogram = meminfo_histogram();        // ['App\Entity\User' => ['count' => 120, 'size' => 8640], …]
+file_put_contents('histo-' . time() . '.json', json_encode(['timestamp' => time(), 'classes' => $histogram]));
+```
+
+Objects of an old generation that are still alive several jobs later are what a leak looks like.
+`meminfo_histogram()` reads only the object store: it builds no graph and writes no JSON, so it is
+cheap enough to call every few minutes. The browser UI compares any number of these files.
+
 ### Dumping a running process
 
 When a worker is already running and leaking, ask it for a dump from outside, without changing or
@@ -163,17 +196,20 @@ restarting it. The target only needs the extension loaded; it writes the dump at
 between two opcodes, and the command prints its path:
 
 ```bash
-$ dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force]
+$ dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force] [--count=N --interval=TIME]
 $ dump-meminfo 12345 --dir=/tmp
 /tmp/meminfo-1834201933.json
+$ dump-meminfo 12345 --count=3 --interval=5m     # a series: open the three files together in the UI
 ```
 
 The same from PHP: `$path = meminfo_dump_process(12345, ['dir' => '/tmp']);`. Every failure throws;
 the command exits with 1 on a runtime failure and 2 on bad usage. Under php-fpm, only a worker that is
 serving a request can be dumped — take its pid from the status page, never the master's.
 
-Errors, settings, FPM, containers, security and limitations are covered in
-[Dumping a running process](doc/process_dump.md).
+A worker can also dump itself: at a quiet point between two jobs (`meminfo.dump_defer`), when
+`memory_limit` is reached (`meminfo.dump_on_limit`), or once memory usage passes a threshold
+(`meminfo.dump_threshold`). Errors, settings, worker recipes, FPM, containers, security and
+limitations are covered in [Dumping a running process](doc/process_dump.md).
 
 ### Analyzing a dump in the browser
 
@@ -185,10 +221,35 @@ $ make ui-install
 $ make ui-dev         # then open the printed URL
 ```
 
-It shows the leak suspects (what retains the most memory), growth against an earlier dump of the same
-process, a summary by type and class, the largest collections, a search, and for any item every
-reference path from a root and a graph of what keeps it reachable. See `ui/README.md` for building
-and testing it.
+It shows:
+
+- **Leak suspects**: what retains the most memory, by item, class and frame, and where the objects
+  were created (with `meminfo.track_allocations`).
+- **Findings**: patterns that usually mean a leak or waste, each with a hypothesis and what to check
+  next. They include holders of many small items, a dominant class, cycles, many closures from one
+  line, sparse arrays, duplicate strings, unreachable objects, and memory held by no item.
+- **How held**: the instances of a class grouped by the shape of their path from a root, with all
+  paths merged into one tree.
+- **Ignored holders**: exclude a cache, a logger or framework internals, and everything is
+  recomputed. The filter is kept in the URL.
+- **Growth** against earlier dumps of the same process:
+  - open a series (`dump-meminfo --count`) to see what grows at every step;
+  - objects created between the first two dumps and still alive in the last are listed as leak
+    candidates;
+  - you can also load generations and `meminfo_histogram()` files.
+- **Summary, top children, search**, and for any item every reference path from a root and a graph
+  of what keeps it reachable.
+
+The same analysis runs without a browser, for CI:
+
+```bash
+$ cd ui && npm ci && npm run build:report
+$ node dist-report/cli.js after.json --baseline=before.json --fail-on=high --max-growth=1000 > report.json
+```
+
+`--format=html` writes a standalone page instead of JSON. The command exits with 1 when a rule
+trips. The rules that tripped go to stderr without names from the dump, unless `--show-names` is
+given. See `ui/README.md` for building and testing the UI.
 
 [Hunting down memory leaks](doc/hunting_down_memory_leaks.md) walks through a real investigation with
 it, step by step.
@@ -223,15 +284,38 @@ flowchart LR
 
 The walk starts from every root, in this order, and follows every reference it finds:
 
-1. the execution frames of the current call stack, then the frames of suspended Fibers (PHP 8.1+);
-2. the global variables;
-3. static properties of classes;
-4. `static` variables of functions and methods;
-5. registered callbacks: error and exception handlers, shutdown functions, output buffer handlers;
-6. user constants that hold arrays or objects.
+1. The execution frames of the current call stack, then the frames of suspended Fibers (PHP 8.1+).
+   Besides its variables, a frame holds more:
+   - `$this`;
+   - the running `{closure}`;
+   - arguments beyond the declared ones and every argument of an internal call (`[arg N]`,
+     `[named args]`);
+   - live temporaries, such as the array a `foreach` iterates over (`[tmp]`);
+   - arguments already passed to a call not made yet (`[pending arg]`).
+2. The global variables.
+3. Static properties of classes, and class constants holding objects, such as enum cases
+   (`<CLASS_CONSTANT>`).
+4. `static` variables of functions and methods.
+5. Registered callbacks (`<CALLBACK>`):
+   - error and exception handlers, shutdown functions and output buffer handlers;
+   - autoloaders and tick functions;
+   - `header_register_callback()`, the session save handler and `pcntl_signal()` handlers;
+   - the libxml external entity loader (8.2+) and the options of the default stream context.
+6. User constants that hold arrays or objects.
+7. Output buffers, as items of type `buffer` (`<OUTPUT_BUFFER>`).
+8. With the `unreachable` option, objects still alive that none of the above reaches
+   (`<UNREACHABLE>`).
 
-Each value reached is written once, as an item keyed by its address. Objects are keyed by the
-object, so many variables pointing at one object give one item. An item lists its children by name
+Each allocation reached is written once, as an item keyed by its address:
+
+- an object is keyed by the object;
+- a refcounted string or array is keyed by its `zend_string` or `zend_array`.
+
+So many variables pointing at one value give one item. A lazy object (8.4) also leads to its
+initializer, or to the real instance once a proxy is initialized, and nothing is initialized by
+the dump. A fiber also leads to the callable it was created with and to its return value.
+Not reached: the context set by `libxml_set_streams_context()`, stream notification callbacks, and
+the stacks of Swoole coroutines that are not suspended Fibers. An item lists its children by name
 and address before they are visited. The walk uses its own stack instead of C recursion, so deep
 structures cannot overflow it. Reading an object never calls PHP code (`__get`, `__debugInfo`) and
 never builds a property table that the object did not have.
@@ -256,8 +340,14 @@ flowchart TD
 The writer allocates its buffer outside PHP's memory manager, so a dump does not count against
 `memory_limit`. A regular file is written directly. Other streams (sockets, pipes, filtered or
 userspace streams) are spooled to a temporary file first and copied once the walk is over, so no
-PHP code runs in the middle of it. The `size` of an item is an estimate of the value's own
-structure: the zval plus a string's bytes, an array's hash table or an object.
+PHP code runs in the middle of it. The `size` of an item is the allocation it stands for:
+
+- an object's struct with its property slots and property table;
+- an array's header, slots and hash index, plus its string keys;
+- a string's header and characters;
+- a stream's buffers and, for `php://memory`, its content.
+
+Scalars and interned strings live inside their holder and count 0.
 
 ### How a running process is dumped
 
@@ -299,7 +389,8 @@ opcode and so cannot answer until it wakes up. Settings, security checks, FPM an
 
 ```json
 {
-  "header": {"memory_usage": 2097152, "memory_usage_real": 2097152, "peak_memory_usage": 2097152, "peak_memory_usage_real": 2097152},
+  "header": {"memory_usage": 2097152, "memory_usage_real": 2097152, "peak_memory_usage": 2097152, "peak_memory_usage_real": 2097152,
+             "identity_model": 2, "size_model": 2, "php_version": "8.4.1", "sapi": "cli", "pid": 4242, "rss": 31457280, "…": "…"},
   "items": {
     "0x7f2a4c05e0c0": {"type": "array", "size": "128", "symbol_name": "users", "is_root": true, "frame": "<GLOBAL>",
                        "children": {"0": "0x7f2a4c062a00"}},
@@ -313,8 +404,22 @@ opcode and so cannot answer until it wakes up. Settings, security checks, FPM an
 - `children` maps a property name or array key to the address of another item. The graph follows
   these edges.
 - `is_root` items carry `symbol_name` and `frame`: the variable name and where it lives (`func()`,
-  `Class->method()`, `<GLOBAL>`, `<CLASS_STATIC_MEMBER>`, `<STATIC_VARIABLE>`, `<CALLBACK>`,
-  `<CONSTANT>`).
+  `Class->method()`, `<GLOBAL>`, `<CLASS_STATIC_MEMBER>`, `<CLASS_CONSTANT>`, `<STATIC_VARIABLE>`,
+  `<CALLBACK>`, `<CONSTANT>`, `<OUTPUT_BUFFER>`, `<UNREACHABLE>`). The roots of a frame also carry
+  `line`, the line the frame is at.
+- Optional item fields:
+  - `function` and `declared_at` for closures;
+  - `resource_type` for resources;
+  - `capacity` and `used` for arrays;
+  - `hash` with `string_hashes`;
+  - `generation` after `meminfo_mark()`;
+  - `site` with `meminfo.track_allocations`.
+- The header describes the process: version, SAPI, pid, time, `memory_limit`, `rss`, GC counters,
+  the VM stack and the number of classes and functions compiled. `trigger` says what the dump was
+  taken on: `call`, `deferred`, `signal`, `threshold` or `memory_limit`. The last three were taken in
+  the middle of the work, and the UI says so when it compares them.
+- `identity_model` and `size_model` are 2 since items stand for allocations. The UI still reads
+  older dumps.
 
 ### Analysis in the browser
 
@@ -345,6 +450,11 @@ default ([buffering](https://www.php.net/manual/en/mysqlinfo.concepts.buffering.
 extensions hold large buffers. All of it goes through the Zend Memory Manager, so it counts towards
 `memory_get_usage()` and `memory_limit`, but meminfo only sees the data structures of your program,
 not the extensions' own memory. Hence the gap, which can be large.
+
+The UI shows the size of that gap. It also reports when the process (`rss` in the header) is much
+bigger than what PHP allocated, which points at memory allocated outside PHP. A header
+`user_class_count` that grows from dump to dump means code is being compiled at runtime (`eval()`,
+proxy generators) and never freed.
 
 ### "Call to undefined function" when calling `meminfo_dump`
 

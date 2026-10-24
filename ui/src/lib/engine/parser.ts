@@ -56,6 +56,15 @@ const F_FRAME = 5
 const F_CLASS = 6
 const F_HANDLE = 7
 const F_CHILDREN = 8
+const F_FUNCTION = 9
+const F_DECLARED_AT = 10
+const F_LINE = 11
+const F_RESOURCE_TYPE = 12
+const F_CAPACITY = 13
+const F_USED = 14
+const F_HASH = 15
+const F_GENERATION = 16
+const F_SITE = 17
 
 const encoder = new TextEncoder()
 const FIELDS: Array<[Uint8Array, number]> = [
@@ -67,6 +76,15 @@ const FIELDS: Array<[Uint8Array, number]> = [
   [encoder.encode('class'), F_CLASS],
   [encoder.encode('object_handle'), F_HANDLE],
   [encoder.encode('children'), F_CHILDREN],
+  [encoder.encode('function'), F_FUNCTION],
+  [encoder.encode('declared_at'), F_DECLARED_AT],
+  [encoder.encode('line'), F_LINE],
+  [encoder.encode('resource_type'), F_RESOURCE_TYPE],
+  [encoder.encode('capacity'), F_CAPACITY],
+  [encoder.encode('used'), F_USED],
+  [encoder.encode('hash'), F_HASH],
+  [encoder.encode('generation'), F_GENERATION],
+  [encoder.encode('site'), F_SITE],
 ]
 const KEY_HEADER = encoder.encode('header')
 const KEY_ITEMS = encoder.encode('items')
@@ -389,8 +407,11 @@ export class DumpParser {
         this.builder.addEdge(this.edgeName, this.addressHi, this.addressLo)
         return
       }
+      case CTX_HEADER:
+        this.builder.header[this.headerKey] = this.decodeString()
+        return
       default:
-        // header strings, values of unknown fields: not needed
+        // values of unknown fields: not needed
         return
     }
   }
@@ -452,6 +473,21 @@ export class DumpParser {
       case F_CLASS:
         b.classId[item] = this.classNames.intern(this.string, this.stringLength)
         return
+      case F_FUNCTION:
+        b.extra(item).function = this.decodeString()
+        return
+      case F_DECLARED_AT:
+        b.extra(item).declaredAt = this.decodeString()
+        return
+      case F_RESOURCE_TYPE:
+        b.extra(item).resourceType = this.decodeString()
+        return
+      case F_HASH:
+        b.extra(item).hash = this.decodeString()
+        return
+      case F_SITE:
+        b.setSite(item, this.decodeString())
+        return
       case F_HANDLE:
         b.handle[item] = this.parseDecimal() | 0
         return
@@ -470,10 +506,25 @@ export class DumpParser {
       this.builder.header[this.headerKey] = value
     } else if (ctx === CTX_ITEM) {
       // Sizes and handles are strings in every dump so far; accept numbers too.
-      if (this.field === F_SIZE) {
-        this.builder.size[this.item] = value
-      } else if (this.field === F_HANDLE) {
-        this.builder.handle[this.item] = value | 0
+      switch (this.field) {
+        case F_SIZE:
+          this.builder.size[this.item] = value
+          return
+        case F_HANDLE:
+          this.builder.handle[this.item] = value | 0
+          return
+        case F_LINE:
+          this.builder.extra(this.item).line = value
+          return
+        case F_CAPACITY:
+          this.builder.extra(this.item).capacity = value
+          return
+        case F_USED:
+          this.builder.extra(this.item).used = value
+          return
+        case F_GENERATION:
+          this.builder.setGeneration(this.item, value | 0)
+          return
       }
     }
   }

@@ -24,6 +24,10 @@
 #include "php_meminfo.h"
 #include "internal.h"
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+
 /* ------------------------------------------------------------------------- *
  * Trigger side
  *
@@ -395,3 +399,38 @@ MEMINFO_HIDDEN int meminfo_dump_file_is_trustworthy(const char *path, pid_t pid)
 }
 
 #endif /* !PHP_WIN32 */
+
+/**
+ * Resident size of this process in bytes, 0 where it cannot be read: memory
+ * the Zend allocator does not see (extensions' own malloc, libraries, code)
+ * shows as the gap between this and memory_usage.
+ */
+MEMINFO_HIDDEN size_t meminfo_self_rss(void)
+{
+#if defined(__APPLE__)
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t) &info, &count) != KERN_SUCCESS) {
+        return 0;
+    }
+
+    return (size_t) info.resident_size;
+#elif defined(__linux__)
+    unsigned long size = 0, resident = 0;
+    FILE *statm = fopen("/proc/self/statm", "r");
+    long page = sysconf(_SC_PAGESIZE);
+    int read;
+
+    if (statm == NULL) {
+        return 0;
+    }
+    read = fscanf(statm, "%lu %lu", &size, &resident);
+    fclose(statm);
+
+    return read == 2 && page > 0 ? (size_t) resident * (size_t) page : 0;
+#else
+    return 0;
+#endif
+}
+

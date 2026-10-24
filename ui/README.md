@@ -8,7 +8,9 @@ page. User-facing documentation is in the repository's README ("Analyzing a dump
 
 | Path | What lives there |
 |---|---|
-| `src/lib/engine/` | Pure TypeScript, no DOM: the streaming `parser.ts`, the columnar `DumpStore` (`store.ts`), and `analyses/` (summary, top children, query, reference paths, dominators, suspects, diff) |
+| `src/lib/engine/` | Pure TypeScript, no DOM: the streaming `parser.ts`, the columnar `DumpStore` (`store.ts`; optional fields as sparse `extras`, generations and allocation sites as columns allocated only when present), and `analyses/` (summary, top children, query, reference paths, dominators, suspects, diff with series and three-dump leak candidates, findings, retainers, filters, generations, sites, histogram) |
+| `src/lib/report/` | `report.ts`: the headless report (`buildReport()`, `renderHtml()`), pure |
+| `report/cli.ts` | The `meminfo-report` command for Node, built by `npm run build:report` into `dist-report/cli.js` (the engine imports without file extensions, which Node does not resolve) |
 | `src/lib/worker/` | `session.ts` (one dump, every request on it), `dump.worker.ts`, the page-side `client.ts`, and `protocol.ts` — the only types that cross the boundary |
 | `src/lib/state/` | App state on Svelte 5 runes; everything from the worker is `$state.raw` |
 | `src/lib/components/` | `VirtualTable` (windowed, paged, height-capped), load/progress/recovery screens, `Inspector`, `AddressLink`, `views/` |
@@ -26,6 +28,7 @@ npm run build        # static build in dist/ (relative URLs; serve it, file:// d
 npm run check        # svelte-check + tsc (app, node scripts, unit tests, e2e)
 npm test             # engine tests (Vitest)
 npm run test:e2e     # build + Playwright (Chromium; `npx playwright install chromium` once)
+npm run build:report # dist-report/cli.js: node dist-report/cli.js <dump> [--baseline=<dump>] [--format=json|html] [--fail-on=high|medium|low] [--max-growth=N] [--show-names] [--verbose]
 
 MEMINFO_PERF=1 npx vitest run src/lib/engine/parser.perf.test.ts   # parser throughput on ~370 MB
 MEMINFO_E2E_HUGE=1 npm run test:e2e                                  # adds a dump past 512 MiB
@@ -39,7 +42,7 @@ that recorded them is gone, so `make-fixtures.php` skips them unless given `--pa
 
 ## Deployment
 
-`.github/workflows/ui.yaml` runs the checks, Vitest and Playwright on every change under `ui/`, and on
+`.github/workflows/ui.yaml` runs the checks, Vitest, the headless report on the leak fixture and Playwright on every change under `ui/`, and on
 `master` publishes the very `dist/` the e2e tests ran against to GitHub Pages. Asset URLs are
 relative (`base: './'`), so the repository sub-path needs no configuration, and the CSP is a `<meta>`
 tag, so it holds without custom headers, which Pages cannot set. Once per repository: Settings → Pages → Source:
@@ -51,7 +54,9 @@ tag, so it holds without custom headers, which Pages cannot set. Once per reposi
 - The file is streamed (`file.stream()`), never read whole: `Blob.text()` silently returns `""`
   past 512 MiB and `JSON.parse` loses duplicate `children` keys.
 - No per-item objects: typed-array columns, interned names, children as CSR.
-- One worker per dump, terminated to free it; a baseline is reduced to totals in a worker of its own.
+- One worker per dump, terminated to free it. A baseline is reduced in a worker of its own to totals,
+  the biggest containers and the (handle, class) pair of each object, 8 bytes an object. Histogram
+  files are read in a worker too.
 - Data from the worker is `$state.raw`; tables are windowed and fetch pages.
 - Graphs are built in the worker (`analyses/subgraph.ts`) and only a bounded subgraph crosses to the
   page: at most 300 items per request, 600 on screen with expansions.

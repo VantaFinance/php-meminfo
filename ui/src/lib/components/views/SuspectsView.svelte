@@ -2,8 +2,11 @@
   import { formatBytes, formatCount, formatPercent } from '../../format'
   import { createLogger } from '../../log'
   import { app } from '../../state/app.svelte'
+  import { sizesAreAllocations, unattributedMemory } from '../../engine/store'
   import type { ClassRetentionRow, SuspectRow, SuspectsResult } from '../../worker/protocol'
+  import type { SitesReport } from '../../engine/analyses/sites'
   import ItemLabel from '../ItemLabel.svelte'
+  import RetainersPanel from '../RetainersPanel.svelte'
   import VirtualTable, { type Column } from '../VirtualTable.svelte'
 
   const log = createLogger('suspects-view')
@@ -33,6 +36,32 @@
 
   const total = $derived(result?.totalSize ?? 0)
 
+  // Where objects were created, when the dump was taken with meminfo.track_allocations.
+  let sites = $state.raw<SitesReport | null>(null)
+  $effect(() => {
+    void app.generation
+    const client = app.client
+    sites = null
+    if (client === null) return
+    let cancelled = false
+    client
+      .request({ kind: 'sites' })
+      .then((value) => {
+        if (!cancelled) sites = value
+      })
+      .catch((error: unknown) => log.warn('sites failed', { error: String(error) }))
+    return () => {
+      cancelled = true
+    }
+  })
+  const unattributed = $derived(app.overview && result ? unattributedMemory(app.overview.header, result.totalSize) : null)
+
+  $effect(() => {
+    if (unattributed !== null && app.overview?.header.memory_usage) {
+      log.info('unattributed memory', { share: unattributed / app.overview.header.memory_usage })
+    }
+  })
+
   const classColumns: Column<ClassRetentionRow>[] = [
     { key: 'key', label: 'Class or type', width: 'minmax(160px, 1fr)', value: (row) => row.key },
     { key: 'retained', label: 'Retained', width: '96px', align: 'right', value: (row) => formatBytes(row.retained), compare: (a, b) => a.retained - b.retained },
@@ -47,6 +76,7 @@
       title: () => 'Instances not kept alive by another instance of the same class',
       compare: (a, b) => a.topMost - b.topMost,
     },
+    { key: 'how', label: '', width: '104px', value: () => 'How held' },
   ]
 
   const suspectColumns: Column<SuspectRow>[] = [
@@ -83,9 +113,20 @@
   {:else}
     <p class="notice">
       The dump accounts for {formatBytes(result.totalSize)}{#if app.overview?.header.memory_usage}{' '}of the
-        {formatBytes(app.overview.header.memory_usage)} PHP reported in use{/if}. Sizes are the dump's estimates, and
-      a value also held by a global or a static after a local may be missing its other holders, so treat retained sizes as
-      relative.
+        {formatBytes(app.overview.header.memory_usage)} PHP reported in use{/if}.
+      {#if app.overview && sizesAreAllocations(app.overview.header)}
+        Sizes are the allocations items stand for; values stored inside an array or an object are counted by their holder.
+      {:else}
+        This dump comes from an older extension: sizes are rough estimates, and a string or array shared by several
+        holders is counted once per holder.
+      {/if}
+      A value also held by a global or a static after a local may be missing its other holders, so treat retained sizes
+      as relative.
+      {#if unattributed && app.overview?.header.memory_usage}
+        {formatBytes(unattributed)} ({formatPercent(unattributed, app.overview.header.memory_usage)}) of PHP's memory is
+        held by no item: extension internals (mysqlnd buffered results, DOM documents, image libraries), compiled code{#if app.overview.header.user_class_count}{' '}({formatCount(app.overview.header.user_class_count)} user classes){/if},
+        the VM stack and allocator overhead.
+      {/if}
       {#if result.sharedItems > 0}
         {formatCount(result.sharedItems)} items are shared by several roots and retained by none of them alone.
       {/if}
@@ -127,12 +168,53 @@
         {#snippet cell(row, column)}
           {#if column.key === 'share'}
             {@render share(row.retained)}
+          {:else if column.key === 'how'}
+            <button
+              type="button"
+              class="button quiet"
+              onclick={(event) => {
+                event.stopPropagation()
+                app.showRetainers({ key: row.key, isClass: row.isClass })
+              }}>How held</button
+            >
           {:else}
             {column.value(row)}
           {/if}
         {/snippet}
       </VirtualTable>
     </div>
+
+    {#if app.retainersFor}
+      <RetainersPanel target={app.retainersFor} />
+    {/if}
+
+    {#if sites && sites.sites.length > 0}
+      <div class="block">
+        <h3>Where the memory was allocated</h3>
+        <p class="hint">
+          {formatCount(sites.tracked)} of {formatCount(sites.objects)} objects have the line of the <code>new</code> that
+          created them (meminfo.track_allocations); objects made otherwise (unserialize, Reflection, extensions) have none.
+        </p>
+        <ul class="frames">
+          {#each sites.packages.slice(0, 8) as row (row.key)}
+            <li>
+              <span class="mono">{row.key}</span>
+              <span class="muted">{formatCount(row.objects)} objects</span>
+              <span class="num">{formatBytes(row.retained)}</span>
+            </li>
+          {/each}
+        </ul>
+        <ul class="frames">
+          {#each sites.sites.slice(0, 15) as row (row.key)}
+            <li>
+              <span class="mono" title={row.key}>{row.key.slice(row.key.lastIndexOf('/') + 1)}</span>
+              <span class="muted">{formatCount(row.objects)} objects</span>
+              <span class="num">{formatBytes(row.retained)}</span>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
 
     {#if result.frames.length > 0}
       <div class="block">

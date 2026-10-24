@@ -51,7 +51,7 @@ if test "$PHP_MEMINFO" = "yes"; then
   dnl Every source is listed unconditionally: a module whose platform or PHP
   dnl version guard is off compiles to an empty object. Keep in step with
   dnl CMakeLists.txt.
-  PHP_NEW_EXTENSION(meminfo, meminfo.c writer.c ptr_set.c traverse.c items.c fibers.c signal.c procinfo.c trigger.c, $ext_shared)
+  PHP_NEW_EXTENSION(meminfo, meminfo.c writer.c ptr_set.c traverse.c items.c fibers.c signal.c procinfo.c trigger.c generations.c sites.c, $ext_shared)
 
   dnl Errors are reported by throwing SPL exceptions, so SPL has to be
   dnl initialised before this extension is.

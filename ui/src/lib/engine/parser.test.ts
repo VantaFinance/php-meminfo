@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { DumpParseError, DumpParser, parseDumpStream } from './parser'
-import type { DumpStore, ItemView } from './store'
+import { sizesAreAllocations, takenMidWork, unattributedMemory, type DumpStore, type ItemView } from './store'
 import { generateDump } from '../../../scripts/gen-dump.ts'
 
 const fixture = (name: string): Uint8Array =>
@@ -231,6 +231,63 @@ describe('DumpParser on edge cases', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it('reads one item shared by several parents (identity_model 2)', () => {
+    const store = parseText(
+      '{"header":{"memory_usage":1,"identity_model":2},"items":{' +
+        '"0x10":{"type":"array","size":"72","symbol_name":"a","is_root":true,"frame":"<GLOBAL>","children":{"0":"0x30"}},' +
+        '"0x20":{"type":"array","size":"72","symbol_name":"b","is_root":true,"frame":"<GLOBAL>","children":{"0":"0x30","1":"0x30"}},' +
+        '"0x30":{"type":"string","size":"1016","is_root":false}}}',
+    )
+
+    expect(store.header.identity_model).toBe(2)
+    expect(store.count).toBe(3)
+    expect(store.item(0).children?.map((c) => c.targetAddress)).toEqual(['0x30'])
+    expect(store.item(1).children?.map((c) => c.target)).toEqual([2, 2])
+  })
+
+  it('tells allocation sizes (size_model 2) from the estimates of older dumps', () => {
+    expect(sizesAreAllocations(parseText('{"header":{"size_model":2},"items":{}}').header)).toBe(true)
+    expect(sizesAreAllocations(parseText('{"header":{"memory_usage":1},"items":{}}').header)).toBe(false)
+  })
+
+  it('reads the sparse fields: closure location, frame line, resource type, array slots', () => {
+    const store = parseText(
+      '{"header":{},"items":{' +
+        '"0x10":{"type":"object","size":"344","symbol_name":"cb","is_root":true,"frame":"run()","line":25,' +
+        '"class":"Closure","object_handle":"3","function":"App\\\\Listener::{closure}","declared_at":"/app/src/Listener.php:12","children":{}},' +
+        '"0x20":{"type":"resource","size":"24","is_root":false,"resource_type":"stream"},' +
+        '"0x30":{"type":"array","size":"376","is_root":false,"capacity":8,"used":3,"children":{}},' +
+        '"0x40":{"type":"int","size":"0","is_root":false}}}',
+    )
+
+    expect(store.item(0).extras).toEqual({
+      line: 25,
+      function: 'App\\Listener::{closure}',
+      declaredAt: '/app/src/Listener.php:12',
+    })
+    expect(store.item(1).extras).toEqual({ resourceType: 'stream' })
+    expect(store.item(2).extras).toEqual({ capacity: 8, used: 3 })
+    expect(store.item(3).extras).toBeUndefined()
+  })
+
+  it('computes the memory no item accounts for only from allocation sizes', () => {
+    expect(unattributedMemory({ memory_usage: 1000, size_model: 2 }, 600)).toBe(400)
+    expect(unattributedMemory({ memory_usage: 1000, size_model: 2 }, 1200)).toBe(0)
+    expect(unattributedMemory({ memory_usage: 1000 }, 600)).toBeNull()
+    expect(unattributedMemory({ size_model: 2 }, 600)).toBeNull()
+  })
+
+  it('keeps the strings and numbers of the header, and reads an older header without them', () => {
+    const header = parseText('{"header":{"php_version":"8.4.1","sapi":"cli","pid":42,"rss":1048576},"items":{}}').header
+    expect(header).toMatchObject({ php_version: '8.4.1', sapi: 'cli', pid: 42, rss: 1048576 })
+    expect(parseText('{"header":{"memory_usage":1},"items":{}}').header.php_version).toBeUndefined()
+  })
+
+  it('tells dumps taken in the middle of the work from the others', () => {
+    for (const trigger of ['signal', 'threshold', 'memory_limit']) expect(takenMidWork({ trigger })).toBe(true)
+    for (const trigger of ['call', 'deferred', 'threshold (deferred)', undefined]) expect(takenMidWork({ trigger })).toBe(false)
   })
 
   it('reads an empty dump', () => {

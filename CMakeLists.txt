@@ -34,6 +34,8 @@ add_library(meminfo OBJECT
     extension/signal.c
     extension/procinfo.c
     extension/trigger.c
+    extension/generations.c
+    extension/sites.c
     extension/internal.h
     extension/php_meminfo.h
 )

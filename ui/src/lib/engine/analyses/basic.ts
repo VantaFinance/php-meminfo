@@ -252,11 +252,13 @@ export class ReferencePathFinder {
   private readonly via: Int32Array
   private readonly viaEdge: Int32Array
   private readonly queue: Int32Array
+  private readonly ignored: Uint8Array | null
   private generation = 0
 
-  constructor(store: DumpStore, preds: Predecessors) {
+  constructor(store: DumpStore, preds: Predecessors, ignored: Uint8Array | null = null) {
     this.store = store
     this.preds = preds
+    this.ignored = ignored
     this.stamp = new Uint32Array(store.count)
     this.via = new Int32Array(store.count)
     this.viaEdge = new Int32Array(store.count)
@@ -282,6 +284,7 @@ export class ReferencePathFinder {
         for (let at = predStart[item]!; at < predStart[item + 1]!; at++) {
           const parent = predSource[at]!
           if (this.stamp[parent] === generation) continue
+          if (this.ignored !== null && this.ignored[predEdge[at]!] === 1) continue
           this.stamp[parent] = generation
           this.via[parent] = item
           this.viaEdge[parent] = predEdge[at]!

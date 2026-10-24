@@ -156,6 +156,7 @@ jobs:
         run: |
           grep -E '(PASS|FAIL).*tests/dump-signal_process\.phpt' extension/run-tests.log
           grep -E '(PASS|FAIL).*tests/dump-signal_process_dir\.phpt' extension/run-tests.log
+          grep -E '(PASS|FAIL).*tests/dump-signal_process_series\.phpt' extension/run-tests.log
 
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -192,6 +193,36 @@ jobs:
 
       - name: Run the Swoole scenarios
         run: make repro-swoole PHP_VERSION=${{ matrix.php-versions }}
+
+  # How fast meminfo_dump() writes a ~2M-item graph (tools/bench/), against
+  # master for a branch and against the previous commit on master. Both builds
+  # run interleaved on the same runner; the job fails above 20% slower — two
+  # identical builds already differ by up to 10% on a shared machine.
+  bench:
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+
+      - name: Pick the baseline
+        run: |
+          if [ "$GITHUB_REF_NAME" = "master" ]; then
+            echo "BENCH_BASE=HEAD^" >> "$GITHUB_ENV"
+          else
+            echo "BENCH_BASE=origin/master" >> "$GITHUB_ENV"
+          fi
+
+      - name: Compare dump speed with the baseline
+        run: make bench-compare BENCH_BASE="$BENCH_BASE" BENCH_RUNS=7 BENCH_THRESHOLD=20 BENCH_ROUNDS=3
 
   # The two Composer packages as their users get them: vanta/meminfo built by
   # PIE from the release archive (git archive, trimmed by .gitattributes), and
