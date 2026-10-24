@@ -1,0 +1,8 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`findFindings > is stable on the leak fixture 1`] = `
+[
+  "high accumulation-point: array LeakyCache::requests keeps 200 items alive, none of them big",
+  "high dominant-class: Request retains 92% of the dump",
+]
+`;

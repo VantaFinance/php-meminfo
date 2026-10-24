@@ -58,7 +58,7 @@ export interface RootDistances {
   unreachable: number
 }
 
-export function rootDistances(store: DumpStore): RootDistances {
+export function rootDistances(store: DumpStore, ignored: Uint8Array | null = null): RootDistances {
   const started = performance.now()
   const n = store.count
   const distance = allocate(Int32Array, n, n).fill(-1)
@@ -80,6 +80,7 @@ export function rootDistances(store: DumpStore): RootDistances {
     const next = distance[item]! + 1
     for (let edge = store.childStart[item]!; edge < store.childStart[item + 1]!; edge++) {
       const child = store.edgeTarget[edge]!
+      if (ignored !== null && ignored[edge] === 1) continue
       if (child >= 0 && distance[child] === -1) {
         distance[child] = next
         parent[child] = item

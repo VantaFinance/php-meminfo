@@ -20,7 +20,80 @@ export interface DumpHeader {
   memory_usage_real?: number
   peak_memory_usage?: number
   peak_memory_usage_real?: number
-  [field: string]: number | undefined
+  /**
+   * 2: one item per allocation — a refcounted string or array shared by many
+   * zvals is a single item with several parents. Absent in older dumps, where
+   * every zval holding a string or array was an item of its own.
+   */
+  identity_model?: number
+  /**
+   * 2: an item's size is the allocation it stands for, 0 for values stored
+   * inside their holder (scalars, interned strings). Absent in older dumps,
+   * whose sizes were a zval plus a header per value.
+   */
+  size_model?: number
+  user_class_count?: number
+  php_version?: string
+  sapi?: string
+  pid?: number
+  /** Unix time of the dump, in seconds. */
+  timestamp?: number
+  memory_limit?: number
+  /** Resident size of the process, where the extension could read it. */
+  rss?: number
+  /**
+   * What the dump was taken on: "call" (meminfo_dump()), "deferred" and
+   * "threshold (deferred)" (meminfo_dump_if_requested(), a quiet point), or
+   * "signal", "threshold", "memory_limit" — wherever the code happened to be.
+   */
+  trigger?: string
+  [field: string]: number | string | undefined
+}
+
+/**
+ * Whether the dump was taken in the middle of the work — on a signal served
+ * at the next opcode, a threshold, or the memory_limit fatal error — and so
+ * holds the temporaries of the job then running. Unknown (older dumps) is not.
+ */
+export function takenMidWork(header: DumpHeader): boolean {
+  return header.trigger === 'signal' || header.trigger === 'threshold' || header.trigger === 'memory_limit'
+}
+
+/** Whether item sizes are allocations (size_model 2) rather than rough estimates. */
+export function sizesAreAllocations(header: DumpHeader): boolean {
+  return (header.size_model ?? 1) >= 2
+}
+
+/**
+ * Memory PHP reported in use that no item accounts for: extension internals
+ * (mysqlnd buffered results, DOM documents, image libraries), compiled code,
+ * the VM stack, allocator overhead. Null when the dump's sizes are estimates
+ * (the difference would mean nothing) or memory_usage is missing.
+ */
+export function unattributedMemory(header: DumpHeader, accounted: number): number | null {
+  if (!sizesAreAllocations(header) || header.memory_usage === undefined) {
+    return null
+  }
+  return Math.max(0, header.memory_usage - accounted)
+}
+
+/**
+ * Fields only some items carry, kept sparse: where a closure comes from, the
+ * line a frame root's frame is at, a resource's kind, an array's slots.
+ */
+export interface ItemExtras {
+  /** Closures: the function or method wrapped, with its scope. */
+  function?: string
+  /** Closures from user code: "file:line" of the declaration. */
+  declaredAt?: string
+  /** Roots of a frame: the line the frame is at. */
+  line?: number
+  resourceType?: string
+  /** Arrays: slots allocated and slots used, deleted ones included. */
+  capacity?: number
+  used?: number
+  /** Strings of 32 bytes or more, with the "string_hashes" option: equal hashes, equal strings. */
+  hash?: string
 }
 
 /** Plain view of one item, for details, tests and the parity checks. */
@@ -36,6 +109,7 @@ export interface ItemView {
   handle?: number
   /** Present when the dump had a `children` key, in dump order, duplicates kept. */
   children?: Array<{ name: string; target: number; targetAddress: string }>
+  extras?: ItemExtras
 }
 
 export interface StoreStats {
@@ -80,6 +154,12 @@ export class DumpStore {
     readonly addresses: AddressTable,
     readonly danglingEdges: number,
     readonly duplicateAddresses: number,
+    readonly extras: Map<number, ItemExtras> = new Map(),
+    /** meminfo_mark() generation per item, NONE for non-objects; null when the dump has none. */
+    readonly generation: Int32Array | null = null,
+    /** Allocation site ("file:line") id per item in `sites`; null without meminfo.track_allocations. */
+    readonly siteId: Int32Array | null = null,
+    readonly sites: StringTable = new StringTable(),
   ) {}
 
   address(index: number): string {
@@ -134,6 +214,10 @@ export class DumpStore {
     }
     if (this.handle[index] !== NONE) {
       view.handle = this.handle[index]!
+    }
+    const extras = this.extras.get(index)
+    if (extras !== undefined) {
+      view.extras = extras
     }
     if (this.hasChildrenKey(index)) {
       const children: NonNullable<ItemView['children']> = []
@@ -215,6 +299,12 @@ export class StoreBuilder {
   readonly symbols = new StringTable()
   readonly edgeNames = new StringTable()
   readonly addresses: AddressTable
+  readonly extras = new Map<number, ItemExtras>()
+  /** Allocated on the first "generation" field: most dumps have none. */
+  generation: Int32Array | null = null
+  /** Allocated on the first "site" field, likewise. */
+  siteId: Int32Array | null = null
+  readonly sites = new StringTable()
 
   constructor(expectedItems: number) {
     const items = Math.max(1024, expectedItems)
@@ -233,6 +323,16 @@ export class StoreBuilder {
     this.edgeAddressHi = allocate(Uint32Array, edges, 0)
     this.edgeAddressLo = allocate(Uint32Array, edges, 0)
     this.addresses = new AddressTable(items, this.addressHi, this.addressLo)
+  }
+
+  /** The sparse fields of an item, created on first use. */
+  extra(item: number): ItemExtras {
+    let extras = this.extras.get(item)
+    if (extras === undefined) {
+      extras = {}
+      this.extras.set(item, extras)
+    }
+    return extras
   }
 
   /** Start a new item; returns its index. */
@@ -284,6 +384,28 @@ export class StoreBuilder {
     for (const column of [this.classId, this.frameId, this.symbolId, this.handle]) {
       column.fill(NONE, oldLength)
     }
+    if (this.generation !== null) {
+      this.generation = grow(this.generation, needed, Int32Array, items)
+      this.generation.fill(NONE, oldLength)
+    }
+    if (this.siteId !== null) {
+      this.siteId = grow(this.siteId, needed, Int32Array, items)
+      this.siteId.fill(NONE, oldLength)
+    }
+  }
+
+  setSite(item: number, site: string): void {
+    if (this.siteId === null) {
+      this.siteId = allocate(Int32Array, this.classId.length, this.count).fill(NONE)
+    }
+    this.siteId[item] = this.sites.intern(site)
+  }
+
+  setGeneration(item: number, generation: number): void {
+    if (this.generation === null) {
+      this.generation = allocate(Int32Array, this.classId.length, this.count).fill(NONE)
+    }
+    this.generation[item] = generation
   }
 
   /** Resolve children to indices and freeze the columns at their final length. */
@@ -344,6 +466,10 @@ export class StoreBuilder {
       this.addresses,
       dangling,
       this.duplicateAddresses,
+      this.extras,
+      this.generation === null ? null : this.generation.slice(0, count),
+      this.siteId === null ? null : this.siteId.slice(0, count),
+      this.sites,
     )
     return store
   }

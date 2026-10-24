@@ -1,3 +1,4 @@
+import type { HistogramTrend } from '../engine/analyses/histogram'
 import { createLogger, getLogLevel } from '../log'
 import type { Baseline } from '../engine/analyses/diff'
 import type { FromWorker, Phase, Request, ResponseMap, ToWorker, WorkerError } from './protocol'
@@ -137,6 +138,16 @@ export async function loadBaseline(file: File, onProgress?: ProgressListener, si
     return await client.request({ kind: 'loadBaseline', file }, onProgress)
   } finally {
     signal?.removeEventListener('abort', abort)
+    client.dispose()
+  }
+}
+
+/** Compare class histograms (meminfo_histogram() files) in a worker of their own. */
+export async function loadHistograms(files: File[]): Promise<HistogramTrend> {
+  const client = new DumpClient()
+  try {
+    return await client.request({ kind: 'histograms', files })
+  } finally {
     client.dispose()
   }
 }

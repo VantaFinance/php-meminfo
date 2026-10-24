@@ -1,8 +1,10 @@
 <script lang="ts">
+  import FiltersBar from './lib/components/FiltersBar.svelte'
   import Inspector from './lib/components/Inspector.svelte'
   import LoadPanel from './lib/components/LoadPanel.svelte'
   import Progress from './lib/components/Progress.svelte'
   import Recovery from './lib/components/Recovery.svelte'
+  import FindingsView from './lib/components/views/FindingsView.svelte'
   import GraphView from './lib/components/views/GraphView.svelte'
   import GrowthView from './lib/components/views/GrowthView.svelte'
   import SearchView from './lib/components/views/SearchView.svelte'
@@ -14,6 +16,7 @@
 
   const NAV: Array<{ view: View; label: string; hint: string }> = [
     { view: 'suspects', label: 'Leak suspects', hint: 'What retains the most' },
+    { view: 'findings', label: 'Findings', hint: 'What looks wrong, and why' },
     { view: 'growth', label: 'Growth', hint: 'Compare with an earlier dump' },
     { view: 'summary', label: 'Summary', hint: 'Counts by type and class' },
     { view: 'top', label: 'Top children', hint: 'The largest collections' },
@@ -26,9 +29,9 @@
 
   function pick(event: Event): void {
     const target = event.currentTarget as HTMLInputElement
-    const file = target.files?.[0]
+    const files = [...(target.files ?? [])]
     target.value = ''
-    if (file !== undefined) app.open(file)
+    if (files.length > 0) app.openSeries(files)
   }
 
   // A file dropped anywhere replaces the current dump.
@@ -36,8 +39,8 @@
     if (!event.dataTransfer?.types.includes('Files')) return
     event.preventDefault()
     dragging = false
-    const file = event.dataTransfer.files[0]
-    if (file !== undefined && app.status !== 'loading') app.open(file)
+    const files = [...event.dataTransfer.files]
+    if (files.length > 0 && app.status !== 'loading') app.openSeries(files)
   }
 
   function onDragOver(event: DragEvent): void {
@@ -49,7 +52,7 @@
 
 <svelte:window ondragover={onDragOver} ondrop={onDrop} ondragleave={(event) => event.relatedTarget === null && (dragging = false)} />
 
-<input bind:this={input} class="visually-hidden" type="file" accept=".json,application/json" onchange={pick} aria-label="Open dump" />
+<input bind:this={input} class="visually-hidden" type="file" multiple accept=".json,application/json" onchange={pick} aria-label="Open dump" />
 
 {#if app.status === 'loading' && app.progress}
   <Progress title={`Opening ${app.progress.totalBytes > 0 ? formatBytes(app.progress.totalBytes) : ''} dump`} progress={app.progress} onCancel={() => app.cancel()} />
@@ -65,7 +68,15 @@
         <span class="facts">
           {formatBytes(overview.fileSize)} · {formatCount(overview.stats.items)} items · {formatCount(overview.roots)} roots
           {#if overview.header.memory_usage}· {formatBytes(overview.header.memory_usage)} in use{/if}
+          {#if overview.header.rss}· {formatBytes(overview.header.rss)} resident{/if}
           · read in {formatDuration(overview.parseMs)}
+        </span>
+        <span class="facts">
+          {#if overview.header.php_version}PHP {overview.header.php_version}{/if}
+          {#if overview.header.sapi}· {overview.header.sapi}{/if}
+          {#if overview.header.pid}· pid {overview.header.pid}{/if}
+          {#if overview.header.timestamp}· {new Date(overview.header.timestamp * 1000).toLocaleString()}{/if}
+          {#if overview.header.trigger}· taken on {overview.header.trigger}{/if}
         </span>
       </div>
       <div class="actions">
@@ -90,8 +101,11 @@
     </nav>
 
     <main class="main">
+      <FiltersBar />
       {#if app.view === 'suspects'}
         <SuspectsView />
+      {:else if app.view === 'findings'}
+        <FindingsView />
       {:else if app.view === 'growth'}
         <GrowthView />
       {:else if app.view === 'summary'}
