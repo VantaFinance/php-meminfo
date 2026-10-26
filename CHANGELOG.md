@@ -16,6 +16,13 @@
    - `meminfo_dump_if_requested()` with `meminfo.dump_defer`;
    - `meminfo.dump_on_limit`, `meminfo.dump_threshold` and `meminfo.track_allocations`;
    - `dump-meminfo --count/--interval`.
+ - **S3 dump transport** (`--with-meminfo-s3`, aws-c-s3 from vcpkg via `vcpkg.json`). With
+   `meminfo.dump_upload=s3://bucket/prefix`, every dump the process writes on its own is uploaded in
+   the background — no request waits for it, an exiting process waits up to
+   `meminfo.dump_upload_timeout`. `.uploaded` / `.upload-error` records next to the dump,
+   `meminfo.dump_upload_keep_local`, S3-compatible stores (`meminfo.s3_endpoint`,
+   `meminfo.s3_path_style`), per-pool targets in PHP-FPM, `dump-meminfo --wait-upload` /
+   `meminfo_dump_process(..., ['wait_upload' => true])`.
  - **New dump fields.**
    - Header: process context (PHP version, SAPI, pid, time, `memory_limit`, RSS, GC counters, VM
      stack, compiled classes and functions) and what the dump was taken on (`trigger`).

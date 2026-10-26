@@ -10,7 +10,7 @@ How it works
 ------------
 
 ```bash
-$ dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force] [--count=N] [--interval=TIME]
+$ dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force] [--count=N] [--interval=TIME] [--wait-upload]
 $ dump-meminfo 12345
 /tmp/meminfo-1834201933.json
 ```
@@ -23,6 +23,7 @@ $ dump-meminfo 12345
 | `--force` | Send the signal even when the target does not appear to handle it |
 | `--count=N` | Take N dumps in a row and print one path per line, in order (default: 1) |
 | `--interval=TIME` | Wait between two dumps of a series: seconds, or a number with `s` or `m` (default: `60s`) |
+| `--wait-upload` | Wait until the target has [uploaded the dump](#uploading-dumps-to-s3) and print its `s3://` location instead of the local path |
 
 The only requirement on the target is that the extension is loaded. On receiving the signal it
 records the request and raises the engine's interrupt flag; the dump itself is written at the next
@@ -303,6 +304,111 @@ setting is set. On PHP 8.0 and 8.1 the observer sees only calls to user function
 internal calls too. Before 8.0 the setting is ignored. `dump_on_limit` works from PHP 7.1, like
 signal dumps.
 
+Uploading dumps to S3
+---------------------
+
+A dump the process writes on its own — on a signal, a threshold or `memory_limit` — is a local file
+first. In an ephemeral pod that file is gone with the pod, often before anybody has looked at it. With
+`meminfo.dump_upload` the process also ships each finished dump to S3 or an S3-compatible store
+(MinIO, Ceph, Yandex Object Storage…):
+
+```ini
+meminfo.dump_upload = s3://my-dumps/payments-api
+meminfo.s3_region   = eu-central-1
+```
+
+```
+s3://my-dumps/payments-api/<hostname>/meminfo-1834201933.json
+```
+
+The object key is the prefix, the host name (the pod name in Kubernetes) and the dump's file name.
+The object is `application/json` and carries `x-amz-meta-meminfo-trigger`, `-pid`, `-hostname`,
+`-php-version` and `-version`.
+
+### Building with S3
+
+The transport is optional and off by default; a build without it behaves exactly as before. It uses
+[aws-c-s3](https://github.com/awslabs/aws-c-s3) (the AWS CRT, plain C), which comes from
+[vcpkg](https://vcpkg.io) through `vcpkg.json` at the root of the repository, and is linked
+statically into `meminfo.so`:
+
+```bash
+$ git clone https://github.com/microsoft/vcpkg ~/vcpkg && ~/vcpkg/bootstrap-vcpkg.sh
+$ make vcpkg-install VCPKG_ROOT=~/vcpkg               # into vcpkg_installed/<triplet>
+$ make build MEMINFO_S3=vcpkg_installed/x64-linux     # or arm64-linux, arm64-osx…
+$ php --ri meminfo | grep 'S3 transport'
+S3 transport => yes (aws-c-s3)
+```
+
+With phpize or PIE, pass the same prefix to configure: `./configure --with-meminfo-s3=DIR`, or
+`pie install vanta/meminfo --with-meminfo-s3=/path/to/vcpkg_installed/x64-linux`. On Linux the CRT
+brings its own OpenSSL; its symbols stay inside `meminfo.so` and cannot clash with the OpenSSL of
+ext/openssl or ext/curl. `make s3-build` builds a Debian image with all of it.
+
+### Settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `meminfo.dump_upload` | empty | `s3://bucket[/prefix]`. Empty keeps dumps local only. The prefix may hold letters, digits and `/._-`. |
+| `meminfo.dump_upload_keep_local` | `1` | `0` removes the local file once it is uploaded. |
+| `meminfo.dump_upload_timeout` | `120` | Seconds an exiting process waits for uploads still running. |
+| `meminfo.s3_region` | empty | Region; falls back to `AWS_REGION`, `AWS_DEFAULT_REGION`, then `us-east-1`. |
+| `meminfo.s3_endpoint` | empty | `https://host[:port]` or `http://…` of an S3-compatible store; empty is AWS. |
+| `meminfo.s3_path_style` | `0` | Path-style addresses (`host/bucket/key`), which MinIO and Ceph usually need. |
+
+All are `PHP_INI_SYSTEM`. In PHP-FPM, `meminfo.dump_upload` and `meminfo.s3_*` can differ per pool
+with `php_admin_value`; `meminfo.dump_on_limit` and `meminfo.dump_threshold`, on the other hand, hook
+into the engine at startup, so they have to be on in `php.ini` (a pool can only switch them off).
+
+Credentials come from the environment: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and, for
+temporary credentials, `AWS_SESSION_TOKEN`. PHP-FPM clears the environment of its workers by default,
+so pass them through the pool:
+
+```ini
+; php-fpm pool
+env[AWS_ACCESS_KEY_ID] = $AWS_ACCESS_KEY_ID
+env[AWS_SECRET_ACCESS_KEY] = $AWS_SECRET_ACCESS_KEY
+```
+
+Instance profiles, IRSA (web identity) and `~/.aws` profiles are not read yet. The bucket should have
+default encryption on and no public access: a dump holds keys, class and property names and string
+contents of the process.
+
+### What happens
+
+1. The dump is written to `meminfo.dump_dir` as usual, then handed to the upload.
+2. The upload runs in the background, on threads of its own. **No request waits for it**: the
+   request that produced the dump carries on, and in PHP-FPM the response is not held up.
+3. Once it is over, a record is written next to the dump: `<dump>.json.uploaded` holding the
+   `s3://` location, or `<dump>.json.upload-error` holding the reason. The outcome is also logged,
+   at the next request start or end, dump, `meminfo_dump_if_requested()` or exit.
+4. A process that exits waits up to `meminfo.dump_upload_timeout` for uploads still running, then
+   gives up; their dumps stay local, with an `.upload-error`. A process killed outright (SIGKILL, the
+   OOM killer) loses an upload in flight, never the local file.
+
+A dump on `memory_limit` is uploaded too: an FPM worker survives the fatal error and finishes the
+upload in the background, and the CLI waits for it on its way out.
+
+`dump-meminfo --wait-upload` (`'wait_upload' => true` for `meminfo_dump_process()`) waits for the
+record after the dump and prints the `s3://` location, or fails with the target's reason. With
+`meminfo.dump_upload_keep_local=0` use it: without it, the trigger prints the local path, which goes
+away once the upload is done.
+
+```bash
+$ kubectl exec payments-7d9f-x2x -- dump-meminfo 1 --wait-upload
+s3://my-dumps/payments-api/payments-7d9f-x2x/meminfo-1834201933.json
+$ aws s3 cp s3://my-dumps/payments-api/payments-7d9f-x2x/meminfo-1834201933.json .
+```
+
+### Limits
+
+- Uploads need a build that dumps on its own (PHP 7.1+, NTS, POSIX), like signal dumps.
+- A process forked after it started uploading (`pcntl_fork()` in a CLI daemon) keeps the dumps of the
+  child local and logs it once: the upload threads do not survive `fork()`, and restarting them in
+  the child is not safe. Workers forked before their parent uploaded anything, as PHP-FPM's are,
+  upload normally.
+- The client is sized for a PHP worker: one thread, two connections, 8 MiB parts.
+
 Containers
 ----------
 
@@ -316,7 +422,7 @@ $ kubectl exec <pod> -c <container> -- dump-meminfo <pid>
 An ephemeral debug container shares the PID namespace but not the filesystem, so it will not see the
 dump; run inside the target container instead. With `readOnlyRootFilesystem`, point
 `meminfo.dump_dir` at a writable volume (an `emptyDir` is enough) and make sure it is large enough —
-a dump is roughly 800 bytes per item.
+a dump is roughly 800 bytes per item. To keep dumps past the pod, [upload them to S3](#uploading-dumps-to-s3).
 
 Cleaning up
 -----------
@@ -327,3 +433,6 @@ file is always whole. A target killed mid-dump leaves its `.tmp` behind; those a
 ```bash
 $ find /tmp -maxdepth 1 -name 'meminfo-*.json.tmp' -mtime +1 -delete
 ```
+
+With uploads, the `.json.uploaded` and `.json.upload-error` records next to the dumps are small and
+safe to delete together with them.

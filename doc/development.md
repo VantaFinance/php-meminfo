@@ -88,6 +88,21 @@ several minutes to install the compiler toolchain; later builds reuse the cached
 `make repro`, `make repro-test` and `make repro-build` do the same with ext-protobuf (and optionally
 ext-grpc, `WITH_GRPC=1`) loaded; see `tools/repro/protobuf/`.
 
+The S3 transport (`--with-meminfo-s3`) has its own image, built on the Debian `php:<version>-cli`
+image with aws-c-s3 from vcpkg, and a local S3 server ([versitygw](https://github.com/versity/versitygw))
+started next to it:
+
+```bash
+$ make s3-test          PHP_VERSION=8.4   # the .phpt suite, dump-s3_*.phpt included
+$ make s3-test-valgrind PHP_VERSION=8.4   # the S3 tests with the dumping processes under valgrind
+$ make repro-s3-fpm     PHP_VERSION=8.4   # PHP-FPM scenarios: per-pool settings, hung uploads, clear_env
+$ make s3-shell         PHP_VERSION=8.4   # a shell in the image, the S3 server at http://s3:7070
+```
+
+`S3_TESTS` narrows `s3-test` to some tests. To build with S3 outside Docker, `make vcpkg-install`
+installs the dependencies into `vcpkg_installed/` and `make build MEMINFO_S3=vcpkg_installed/<triplet>`
+links them in.
+
 IDE setup (CLion)
 -----------------
 

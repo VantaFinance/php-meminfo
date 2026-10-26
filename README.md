@@ -113,6 +113,10 @@ $ make build PHPIZE=/usr/local/php-7.4/bin/phpize PHP_CONFIG=/usr/local/php-7.4/
 The reported version and copyright year are build arguments (`make build MEMINFO_VERSION=2.1.0`); see
 [Development](doc/development.md#version-and-copyright-year).
 
+Uploading dumps to S3 is optional: `make vcpkg-install` fetches aws-c-s3 with [vcpkg](https://vcpkg.io)
+(`vcpkg.json`), then `make build MEMINFO_S3=vcpkg_installed/<triplet>` links it in (`./configure
+--with-meminfo-s3=DIR` without Make). See [Building with S3](doc/process_dump.md#building-with-s3).
+
 Without Make, from the `extension` directory:
 
 ```bash
@@ -148,6 +152,7 @@ non-ZTS, POSIX. Elsewhere they are ignored with a warning at startup.
 | `meminfo.dump_string_hashes` | `0` | Default of the `string_hashes` dump option, likewise. |
 | `meminfo.auto_mark` | `0` | Every dump starts a new [generation](#generations-and-histograms) first. |
 | `meminfo.track_allocations` | `0` | Record the line of the `new` that created each object. It costs about 6 ns per `new`, and the opcache JIT does not run while it is on. |
+| `meminfo.dump_upload` | empty | `s3://bucket[/prefix]`: also upload every dump the process writes on its own, in the background. Needs a build with `--with-meminfo-s3`; `meminfo.dump_upload_keep_local`, `meminfo.dump_upload_timeout` and `meminfo.s3_region` / `s3_endpoint` / `s3_path_style` go with it — see [Uploading dumps to S3](doc/process_dump.md#uploading-dumps-to-s3). |
 
 `php -i | grep meminfo` shows what a build resolved. Details, and why `SIGURG`, are in
 [Dumping a running process](doc/process_dump.md#settings).
@@ -208,7 +213,9 @@ serving a request can be dumped — take its pid from the status page, never the
 
 A worker can also dump itself: at a quiet point between two jobs (`meminfo.dump_defer`), when
 `memory_limit` is reached (`meminfo.dump_on_limit`), or once memory usage passes a threshold
-(`meminfo.dump_threshold`). Errors, settings, worker recipes, FPM, containers, security and
+(`meminfo.dump_threshold`). Those dumps can also be [uploaded to S3](doc/process_dump.md#uploading-dumps-to-s3)
+(`meminfo.dump_upload`), so a dump outlives an ephemeral pod; `dump-meminfo --wait-upload` then
+prints the `s3://` location. Errors, settings, worker recipes, FPM, containers, security and
 limitations are covered in [Dumping a running process](doc/process_dump.md).
 
 ### Analyzing a dump in the browser
