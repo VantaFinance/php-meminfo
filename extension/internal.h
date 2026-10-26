@@ -77,6 +77,13 @@ ZEND_TSRMLS_CACHE_EXTERN()
 /* Dump files are named <prefix><id>.json, or <prefix><pid>-<sec>-<usec>.json
  * without an id: written by signal.c, looked for by trigger.c. */
 #define MEMINFO_DUMP_FILE_PREFIX "meminfo-"
+
+/* Written next to a dump once its upload is over: the uploaded one holds the
+ * location ("s3://bucket/key"), the error one the reason. Written by upload.c,
+ * read by trigger.c, and the uploaded one stands for a dump whose local copy
+ * was removed (meminfo.dump_upload_keep_local=0). */
+#define MEMINFO_UPLOADED_SUFFIX ".uploaded"
+#define MEMINFO_UPLOAD_ERROR_SUFFIX ".upload-error"
 /**
  * Set of already-visited item addresses.
  *
@@ -290,6 +297,43 @@ MEMINFO_HIDDEN int meminfo_dump_file_is_trustworthy(const char *path, pid_t pid)
 /* signal.c, called by MINIT/MSHUTDOWN */
 MEMINFO_HIDDEN void meminfo_signal_module_startup(void);
 MEMINFO_HIDDEN void meminfo_signal_module_shutdown(void);
+#endif
+
+/* upload.c: transports for finished dump files */
+MEMINFO_HIDDEN void meminfo_upload_module_startup(void);
+MEMINFO_HIDDEN const char *meminfo_upload_target(void);
+#if MEMINFO_HAVE_SIGNAL_DUMP
+MEMINFO_HIDDEN void meminfo_upload_module_shutdown(void);
+MEMINFO_HIDDEN int meminfo_upload_enabled(void);
+MEMINFO_HIDDEN void meminfo_upload_start(const char *path, const char *trigger);
+MEMINFO_HIDDEN void meminfo_upload_poll(void);
+
+/**
+ * One dump file on its way to a transport. Filled on the PHP thread, then
+ * owned by the transport until meminfo_upload_finished() is called — from
+ * whatever thread the transport completes on.
+ */
+typedef struct {
+    char path[MAXPATHLEN];
+    char bucket[64];
+    char key[MAXPATHLEN + 512];
+    char url[MAXPATHLEN + 600];
+    char trigger[32];
+    char hostname[256];
+    zend_bool keep_local;
+    uint64_t size;
+    uint64_t started_usec;
+    void *transport;        /* the transport's own state for this upload */
+} meminfo_upload_job;
+
+MEMINFO_HIDDEN void meminfo_upload_finished(meminfo_upload_job *job, int ok, const char *error);
+
+/* upload_s3.c: aws-c-s3 behind the "s3://" transport */
+# ifdef MEMINFO_HAVE_S3
+MEMINFO_HIDDEN int meminfo_s3_put(meminfo_upload_job *job, char *error, size_t error_size);
+MEMINFO_HIDDEN void meminfo_s3_cancel_all(void);
+MEMINFO_HIDDEN void meminfo_s3_shutdown(void);
+# endif
 #endif
 
 #endif /* MEMINFO_INTERNAL_H */

@@ -43,9 +43,12 @@
 // roots are not called: their result is allocated from the Zend heap.
 #define MEMINFO_CALL_HEADROOM (256 * 1024)
 
-// Signal numbers asked of pcntl_signal_get_handler(): 1 to NSIG - 1, the range
-// it accepts without a warning or a ValueError.
-#ifdef NSIG
+// Signal numbers asked of pcntl_signal_get_handler(): the range it accepts
+// without a warning (up to 8.1, printed into the process's output) or a
+// ValueError (8.2, 8.3): 1 to 32 before PHP 8.4, 1 to NSIG - 1 since.
+#if PHP_VERSION_ID < 80400
+#define MEMINFO_SIGNAL_COUNT 33
+#elif defined(NSIG)
 #define MEMINFO_SIGNAL_COUNT NSIG
 #else
 #define MEMINFO_SIGNAL_COUNT 65

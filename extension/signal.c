@@ -404,6 +404,8 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, c
     int write_errno;
     int saved_errno;
     int limit_lifted = 0;
+    int written = 0;
+    char uploaded_path[MAXPATHLEN + 16];
 #ifdef HAVE_SETITIMER
     struct itimerval no_timer;
     struct itimerval saved_timer;
@@ -439,10 +441,19 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, c
     }
 
     // An already finished dump for this id means the trigger resent the signal
-    // while waiting; serving it twice would only waste the target's time.
+    // while waiting; serving it twice would only waste the target's time. With
+    // meminfo.dump_upload_keep_local=0 the finished dump may already be gone,
+    // leaving only the record of its upload.
     if (access(final_path, F_OK) == 0) {
         return;
     }
+    if (snprintf(uploaded_path, sizeof(uploaded_path), "%s%s", final_path, MEMINFO_UPLOADED_SUFFIX) < (int) sizeof(uploaded_path)
+        && access(uploaded_path, F_OK) == 0) {
+        return;
+    }
+
+    // Log lines of earlier uploads, before this dump's own.
+    meminfo_upload_poll();
 
     if (snprintf(temp_path, sizeof(temp_path), "%s.tmp", final_path) < 0) {
         return;
@@ -532,7 +543,8 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, c
                 write_errno = errno ? errno : EIO;
             }
 
-            if (meminfo_dump_file_finish(request, temp_path, final_path, write_errno, status) && out_path != NULL) {
+            written = meminfo_dump_file_finish(request, temp_path, final_path, write_errno, status);
+            if (written && out_path != NULL) {
                 snprintf(out_path, out_size, "%s", final_path);
             }
         }
@@ -551,6 +563,12 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, c
     // After the gc: the limit cannot be put back below what is in use.
     if (limit_lifted && !meminfo_set_memory_limit((size_t) PG(memory_limit))) {
         php_log_err((char *) "meminfo: cannot restore memory_limit after the dump; it stays lifted");
+    }
+
+    // Last, once the process is back to normal: the upload runs in the
+    // background and the request carries on.
+    if (written && meminfo_upload_enabled()) {
+        meminfo_upload_start(final_path, MEMINFO_G(dump_trigger));
     }
 }
 
@@ -617,7 +635,7 @@ static void meminfo_dump_on_limit(const char *message, size_t length)
 {
     static const char prefix[] = "Allowed memory size of";
     char path[MAXPATHLEN];
-    char log_message[MAXPATHLEN + 64];
+    char log_message[MAXPATHLEN + 192];
 
     if (!MEMINFO_G(dump_on_limit) || MEMINFO_G(limit_dumped) || MEMINFO_G(dumping)
         || length < sizeof(prefix) - 1 || memcmp(message, prefix, sizeof(prefix) - 1) != 0) {
@@ -636,7 +654,8 @@ static void meminfo_dump_on_limit(const char *message, size_t length)
     // "memory_limit" and the log says it, so a comparison treats this dump as
     // one taken in the middle of the work.
     if (path[0] != '\0') {
-        snprintf(log_message, sizeof(log_message), "meminfo: memory_limit reached, dump written to %s%s", path,
+        snprintf(log_message, sizeof(log_message), "meminfo: memory_limit reached, dump written to %s%s%s", path,
+            meminfo_upload_enabled() ? ", its upload goes on in the background" : "",
             MEMINFO_G(dump_defer) ? " (in the middle of the work: meminfo.dump_defer cannot wait for a fatal error)" : "");
         php_log_err(log_message);
     }
@@ -910,6 +929,10 @@ PHP_FUNCTION(meminfo_dump_if_requested)
     }
 
 #if MEMINFO_HAVE_SIGNAL_DUMP
+    // A long-running worker that calls this in its loop is where the log
+    // lines of finished uploads get out.
+    meminfo_upload_poll();
+
     path[0] = '\0';
     caller = EG(current_execute_data) ? EG(current_execute_data)->prev_execute_data : NULL;
     if (meminfo_serve_dump_request(caller, path, sizeof(path)) && path[0] != '\0') {

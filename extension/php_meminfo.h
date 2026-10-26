@@ -164,6 +164,16 @@ ZEND_BEGIN_MODULE_GLOBALS(meminfo)
     /* dump_threshold in bytes, worked out for this memory_limit (it can change at runtime) */
     size_t threshold_bytes;
     zend_long threshold_limit_seen;
+    /* ini: where finished dump files go besides dump_dir: "" or "s3://bucket[/prefix]" */
+    char *dump_upload;
+    /* ini: keep the local file once it is uploaded */
+    zend_bool dump_upload_keep_local;
+    /* ini: seconds the process waits for pending uploads when it exits */
+    zend_long dump_upload_timeout;
+    /* ini: S3 region, endpoint ("" = AWS) and path-style addressing (MinIO, Ceph) */
+    char *s3_region;
+    char *s3_endpoint;
+    zend_bool s3_path_style;
     /* ini: record where objects are created ("new") */
     zend_bool track_allocations;
     /* the sites by handle; the last "new" not yet matched to its object */

@@ -44,7 +44,8 @@ function dump_meminfo_usage()
     return implode("\n", array(
         'Usage: dump-meminfo <pid> [options]',
         '',
-        'Dumps the memory of a running PHP process to a JSON file and prints its path.',
+        'Dumps the memory of a running PHP process to a JSON file and prints its path',
+        '(or its s3:// location once the target has uploaded it, see --wait-upload).',
         'The target must have the meminfo extension loaded and be inside a request.',
         '',
         'Options:',
@@ -57,6 +58,9 @@ function dump_meminfo_usage()
         '                   Once it has started, the wait continues while it grows.',
         '  --force          Send the signal even when the target does not appear to',
         '                   handle it. May terminate a target that is not listening.',
+        '  --wait-upload    Wait until the target has uploaded the dump (its',
+        '                   meminfo.dump_upload, e.g. S3) and print where it went,',
+        '                   s3://bucket/key, instead of the local path',
         '  --count=N        Take N dumps in a row, one path per line in order (default: 1).',
         '                   Comparing three or more shows what keeps growing.',
         '  --interval=TIME  Wait between two dumps of a series: seconds, or a number',
@@ -67,6 +71,7 @@ function dump_meminfo_usage()
         '  dump-meminfo 12345',
         '  dump-meminfo 12345 --dir=/var/tmp --timeout=60',
         '  dump-meminfo 12345 --count=3 --interval=5m',
+        '  dump-meminfo 12345 --wait-upload',
         '',
         'Open the dump in the browser UI (nothing is uploaded):',
         '  https://vantafinance.github.io/php-meminfo/',
@@ -96,6 +101,11 @@ function dump_meminfo_parse($argv)
 
         if ($argument === '--force') {
             $options['force'] = true;
+            continue;
+        }
+
+        if ($argument === '--wait-upload') {
+            $options['wait_upload'] = true;
             continue;
         }
 
