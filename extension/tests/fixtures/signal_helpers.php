@@ -225,6 +225,13 @@ function meminfo_test_spawn($code, array $iniOptions = array(), $withExtension =
 
     $command = escapeshellarg(meminfo_test_php_binary()) . ' -n';
 
+    // A wrapper for the child, e.g. valgrind (make s3-test-valgrind); trusted:
+    // it comes from whoever runs the suite.
+    $prefix = getenv('MEMINFO_TEST_CHILD_PREFIX');
+    if ($prefix !== false && $prefix !== '') {
+        $command = $prefix . ' ' . $command;
+    }
+
     if ($withExtension) {
         $command .= ' -d ' . escapeshellarg('extension=' . meminfo_test_extension_path());
     }
