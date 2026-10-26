@@ -3,3 +3,6 @@
 
 # CMake build directories (CLion, CMakePresets.json)
 cmake-build-*/
+
+# vcpkg manifest-mode install tree (make vcpkg-install)
+vcpkg_installed/

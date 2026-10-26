@@ -67,3 +67,6 @@ extension/tests/*.php.tmp
 # Browser UI: a Node project of its own, not part of the image (and its
 # node_modules and generated test dumps run to hundreds of MB)
 ui
+
+# vcpkg install tree of the host; the S3 image installs its own
+vcpkg_installed

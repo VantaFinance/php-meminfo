@@ -32,13 +32,26 @@ CONFIGURE_FLAGS ?= --enable-meminfo --with-php-config=$(PHP_CONFIG)
 MEMINFO_VERSION        ?=
 MEMINFO_COPYRIGHT_YEAR ?=
 MEMINFO_CONFIGURE_FLAGS := $(if $(MEMINFO_VERSION),--with-meminfo-version=$(MEMINFO_VERSION)) \
-                           $(if $(MEMINFO_COPYRIGHT_YEAR),--with-meminfo-copyright-year=$(MEMINFO_COPYRIGHT_YEAR))
+                           $(if $(MEMINFO_COPYRIGHT_YEAR),--with-meminfo-copyright-year=$(MEMINFO_COPYRIGHT_YEAR)) \
+                           $(if $(MEMINFO_S3),--with-meminfo-s3=$(abspath $(MEMINFO_S3)))
+
+# --- Optional S3 transport ---
+# aws-c-s3 and its dependencies come from vcpkg (vcpkg.json at the root):
+#   make vcpkg-install && make build MEMINFO_S3=vcpkg_installed/$(VCPKG_TRIPLET)
+# MEMINFO_S3 is any prefix holding include/aws/s3/s3_client.h and the static
+# libraries; empty builds the extension without S3.
+MEMINFO_S3     ?=
+VCPKG_ROOT     ?=
+VCPKG          ?= $(if $(VCPKG_ROOT),$(VCPKG_ROOT)/vcpkg,vcpkg)
+VCPKG_ARCH     := $(subst x86_64,x64,$(subst amd64,x64,$(subst aarch64,arm64,$(shell uname -m))))
+VCPKG_TRIPLET  ?= $(VCPKG_ARCH)-$(if $(filter Darwin,$(shell uname -s)),osx,linux)
 
 # --- Build artifacts ---
 EXT_SO      := $(EXT_DIR)/modules/meminfo.so
 # Same list as PHP_NEW_EXTENSION in extension/config.m4, plus the headers
 EXT_SOURCES := $(addprefix $(EXT_DIR)/,meminfo.c writer.c ptr_set.c traverse.c items.c fibers.c \
-                 signal.c procinfo.c trigger.c generations.c sites.c internal.h php_meminfo.h)
+                 signal.c procinfo.c trigger.c generations.c sites.c upload.c upload_s3.c \
+                 internal.h php_meminfo.h)
 
 # --- Test runner ---
 # REPORT_EXIT_STATUS=1 makes failing .phpt tests return a non-zero exit code.
@@ -69,11 +82,17 @@ $(EXT_SO): $(EXT_DIR)/Makefile $(EXT_SOURCES)
 	$(MAKE) -C $(EXT_DIR)
 
 .PHONY: build
-build: $(EXT_SO) ## Build the C extension (usage: make build [MEMINFO_VERSION=X.Y.Z] [MEMINFO_COPYRIGHT_YEAR=YYYY])
-	@echo "Built $(EXT_SO) with:"; grep -E '^#define MEMINFO_(VERSION|COPYRIGHT_YEAR) ' $(EXT_DIR)/config.h
+build: $(EXT_SO) ## Build the C extension (usage: make build [MEMINFO_VERSION=X.Y.Z] [MEMINFO_COPYRIGHT_YEAR=YYYY] [MEMINFO_S3=prefix])
+	@echo "Built $(EXT_SO) with:"; grep -E '^#define MEMINFO_(VERSION|COPYRIGHT_YEAR|HAVE_S3) ' $(EXT_DIR)/config.h
 
 .PHONY: FORCE
 FORCE:
+
+.PHONY: vcpkg-install
+vcpkg-install: ## Install the optional native dependencies from vcpkg.json (usage: make vcpkg-install [VCPKG_ROOT=...] [VCPKG_TRIPLET=x64-linux])
+	@echo "vcpkg: installing vcpkg.json for $(VCPKG_TRIPLET) into vcpkg_installed/"
+	$(VCPKG) install --triplet=$(VCPKG_TRIPLET) --x-install-root=$(CURDIR)/vcpkg_installed
+	@echo "Build with S3: make build MEMINFO_S3=vcpkg_installed/$(VCPKG_TRIPLET)"
 
 # Sequential sub-makes, so that `make -j rebuild` cannot build while it cleans.
 .PHONY: rebuild
@@ -208,6 +227,57 @@ docker-clean: ## Remove all meminfo:php-* images
 	if [ -n "$$images" ]; then \
 		$(DOCKER) image rm $$images; \
 	fi
+
+# The S3 transport: meminfo built with --with-meminfo-s3 from vcpkg in a Debian
+# image (tools/repro/s3/), tested against a throwaway S3-compatible server.
+S3_TAG           := $(DOCKER_IMAGE)-s3:php-$(PHP_VERSION)
+S3_GATEWAY_IMAGE ?= versity/versitygw:v1.10.0
+S3_TESTS         ?= tests/
+
+.PHONY: s3-build
+s3-build: ## Build the S3-enabled image meminfo-s3:php-X.Y (usage: make s3-build PHP_VERSION=8.4)
+	$(DOCKER) build $(DOCKER_PLATFORM_FLAG) --build-arg PHP_VERSION=$(PHP_VERSION) \
+		-f tools/repro/s3/Dockerfile -t $(S3_TAG) .
+	@echo "Built image $(S3_TAG)"
+
+.PHONY: s3-test
+s3-test: s3-build ## Run the .phpt suite with S3 uploads against a local S3 server (usage: make s3-test [S3_TESTS="tests/dump-s3_*.phpt"])
+	DOCKER=$(DOCKER) S3_GATEWAY_IMAGE=$(S3_GATEWAY_IMAGE) DOCKER_PLATFORM_FLAG="$(DOCKER_PLATFORM_FLAG)" \
+		tools/repro/s3/run-tests.sh $(S3_TAG) $(S3_TESTS)
+
+# The S3 tests with every child process under valgrind: CRT objects outliving
+# their client, callbacks after shutdown, overruns in building the request.
+# Valgrind rather than ASan: PHP loads extensions with RTLD_DEEPBIND, which an
+# ASan runtime preloaded into a PHP built without it refuses.
+S3_VALGRIND_TAG   := $(S3_TAG)-valgrind
+S3_VALGRIND_TESTS ?= tests/dump-s3_signal.phpt tests/dump-s3_failure.phpt tests/dump-s3_no_wait.phpt tests/dump-s3_keep_local.phpt tests/dump-s3_fork.phpt
+
+.PHONY: s3-test-valgrind
+s3-test-valgrind: ## Run the S3 tests with the target processes under valgrind (usage: make s3-test-valgrind PHP_VERSION=8.4)
+	$(DOCKER) build $(DOCKER_PLATFORM_FLAG) --build-arg PHP_VERSION=$(PHP_VERSION) --build-arg EXTRA_PACKAGES=valgrind \
+		-f tools/repro/s3/Dockerfile -t $(S3_VALGRIND_TAG) .
+	DOCKER=$(DOCKER) S3_GATEWAY_IMAGE=$(S3_GATEWAY_IMAGE) DOCKER_PLATFORM_FLAG="$(DOCKER_PLATFORM_FLAG)" \
+		S3_EXTRA_ENV="USE_ZEND_ALLOC=0 ZEND_DONT_UNLOAD_MODULES=1" \
+		S3_RUN='mkdir -p /tmp/vg && MEMINFO_TEST_CHILD_PREFIX="valgrind -q --trace-children=no --error-exitcode=0 --log-file=/tmp/vg/%p.log" make test-one TEST="$(S3_VALGRIND_TESTS)"; status=$$?; cat /tmp/vg/*.log; if grep -qE "Invalid (read|write|free)|uninitialised|Mismatched|ERROR SUMMARY: [1-9]" /tmp/vg/*.log; then echo "valgrind found errors" >&2; exit 1; fi; exit $$status' \
+		tools/repro/s3/run-tests.sh $(S3_VALGRIND_TAG)
+
+# PHP-FPM end to end (tools/repro/s3/fpm/run.php): per-pool targets, a dump on
+# memory_limit uploaded while the worker keeps serving, responses that never
+# wait for an upload, a recycled worker waiting at most the timeout, and
+# clear_env without credentials.
+S3_FPM_TAG := $(DOCKER_IMAGE)-s3-fpm:php-$(PHP_VERSION)
+
+.PHONY: repro-s3-fpm
+repro-s3-fpm: ## Run the PHP-FPM scenarios of the S3 transport (usage: make repro-s3-fpm PHP_VERSION=8.4)
+	$(DOCKER) build $(DOCKER_PLATFORM_FLAG) --build-arg PHP_VERSION=$(PHP_VERSION) --build-arg PHP_VARIANT=fpm \
+		--build-arg EXTRA_PACKAGES=libfcgi-bin -f tools/repro/s3/Dockerfile -t $(S3_FPM_TAG) .
+	DOCKER=$(DOCKER) S3_GATEWAY_IMAGE=$(S3_GATEWAY_IMAGE) DOCKER_PLATFORM_FLAG="$(DOCKER_PLATFORM_FLAG)" \
+		S3_RUN='php /src/tools/repro/s3/fpm/run.php' tools/repro/s3/run-tests.sh $(S3_FPM_TAG)
+
+.PHONY: s3-shell
+s3-shell: s3-build ## Open a shell in the S3 image next to a running S3 server
+	DOCKER=$(DOCKER) S3_GATEWAY_IMAGE=$(S3_GATEWAY_IMAGE) S3_RUN=bash \
+		tools/repro/s3/run-tests.sh $(S3_TAG)
 
 # $(DOCKER_TAG) plus ext-protobuf (and ext-grpc with WITH_GRPC=1), see tools/repro/protobuf/.
 # The pinned PROTOBUF_VERSION builds on PHP 8.1; override it for other versions.
