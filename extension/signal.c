@@ -193,6 +193,26 @@ MEMINFO_HIDDEN int meminfo_request_file_name(char *buffer, size_t size, const ch
 /* The interrupt hook that was in place before this extension chained itself in. */
 static void (*meminfo_previous_interrupt_function)(zend_execute_data *execute_data) = NULL;
 
+/* Opt-in OOM tracing for CI replays. Never called from the signal handler. */
+static int meminfo_dump_debug_enabled = 0;
+
+static void meminfo_dump_debug(const char *stage)
+{
+    int saved_errno;
+
+    if (!meminfo_dump_debug_enabled) {
+        return;
+    }
+
+    saved_errno = errno;
+    // libc stderr does not allocate from the exhausted Zend heap. Do not log
+    // dump contents or use PHP logging/formatting while diagnosing an OOM.
+    fprintf(stderr, "[FIX:oom] %s php=%s pid=%ld memory_limit=%ld usage=%zu on_limit=%d dumped=%d dumping=%d\n",
+        stage, PHP_VERSION, (long) getpid(), (long) PG(memory_limit), zend_memory_usage(0),
+        (int) MEMINFO_G(dump_on_limit), (int) MEMINFO_G(limit_dumped), (int) MEMINFO_G(dumping));
+    errno = saved_errno;
+}
+
 /**
  * Signal handler.
  *
@@ -412,6 +432,8 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, c
     int timer_paused = 0;
 #endif
 
+    meminfo_dump_debug("dump-file-enter");
+
     if (dir == NULL) {
         dir = "/tmp";
     }
@@ -473,6 +495,7 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, c
     // planted symlink cannot redirect the dump; 0600 because a dump exposes
     // array keys, class and property names and heap addresses.
     fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    meminfo_dump_debug(fd < 0 ? "dump-file-open-failed" : "dump-file-opened");
 
     if (fd < 0) {
         saved_errno = errno;
@@ -508,6 +531,7 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, c
             if (PG(memory_limit) > 0 && meminfo_set_memory_limit((size_t) ZEND_LONG_MAX)) {
                 limit_lifted = 1;
             }
+            meminfo_dump_debug(limit_lifted ? "dump-limit-lifted" : "dump-limit-not-lifted");
 
             // During shutdown the chain no longer reaches the main script's
             // frame, so the global scope is walked explicitly.
@@ -520,6 +544,7 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, c
                 meminfo_mark();
             }
             if (meminfo_dump_to_writer_guarded(writer, execute_data, 1, &status)) {
+                meminfo_dump_debug("dump-walk-bailed-out");
                 free(writer);
                 close(fd);
                 unlink(temp_path);
@@ -544,6 +569,7 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, c
             }
 
             written = meminfo_dump_file_finish(request, temp_path, final_path, write_errno, status);
+            meminfo_dump_debug(written ? "dump-file-finished" : "dump-file-failed");
             if (written && out_path != NULL) {
                 snprintf(out_path, out_size, "%s", final_path);
             }
@@ -636,6 +662,8 @@ static void meminfo_dump_on_limit(const char *message, size_t length)
     static const char prefix[] = "Allowed memory size of";
     char path[MAXPATHLEN];
     char log_message[MAXPATHLEN + 192];
+
+    meminfo_dump_debug("memory-error-notification");
 
     if (!MEMINFO_G(dump_on_limit) || MEMINFO_G(limit_dumped) || MEMINFO_G(dumping)
         || length < sizeof(prefix) - 1 || memcmp(message, prefix, sizeof(prefix) - 1) != 0) {
@@ -854,6 +882,10 @@ MEMINFO_HIDDEN void meminfo_restore_signal_handler(void)
 void meminfo_signal_module_startup(void)
 {
     int threshold = MEMINFO_G(dump_threshold) != NULL && MEMINFO_G(dump_threshold)[0] != '\0';
+    const char *debug = getenv("MEMINFO_DEBUG_DUMP");
+
+    meminfo_dump_debug_enabled = debug != NULL && strcmp(debug, "1") == 0;
+    meminfo_dump_debug("module-startup");
 
     if (MEMINFO_G(dump_signal) != 0 || threshold) {
         meminfo_previous_interrupt_function = zend_interrupt_function;
@@ -867,6 +899,7 @@ void meminfo_signal_module_startup(void)
         meminfo_previous_error_cb = zend_error_cb;
         zend_error_cb = meminfo_error_cb;
 #endif
+        meminfo_dump_debug("memory-error-hook-installed");
     }
 
     // Registered only when a threshold is set: every function call then pays

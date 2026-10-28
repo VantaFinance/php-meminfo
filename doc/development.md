@@ -36,6 +36,13 @@ $ REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test
 Every change must keep the PHP 7.0 – 8.5 CI matrix green; engine API differences are handled with
 `PHP_VERSION_ID` preprocessor guards.
 
+On a CI failure, the job prints PHPT diffs and saves runtime details, test output and child-process
+logs in its test artifact. It also replays failed `memory_limit` scenarios with
+`MEMINFO_DEBUG_DUMP=1`: `[FIX:oom]` stderr lines show error-hook registration, error notifications
+and dump-file progress without reading dump contents. This trace is off by default; enabling it
+during the normal suite changes stderr expectations. `MEMINFO_TEST_KEEP_CHILD_OUTPUT=1` keeps
+fixture scripts and child stdout/stderr/error logs in PHP's temporary directory for collection.
+
 Version and copyright year
 --------------------------
 

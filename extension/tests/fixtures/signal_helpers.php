@@ -423,6 +423,11 @@ function meminfo_test_cleanup(array $child, $pid = 0)
     }
 
     foreach (array('pid_file', 'script', 'stdout', 'stderr', 'error_log') as $key) {
+        // CI collects child output after run-tests.php has reported a failure.
+        // Keep the pid cleanup unchanged so process checks never see stale pids.
+        if ($key !== 'pid_file' && getenv('MEMINFO_TEST_KEEP_CHILD_OUTPUT') === '1') {
+            continue;
+        }
         @unlink($child[$key]);
     }
 }
