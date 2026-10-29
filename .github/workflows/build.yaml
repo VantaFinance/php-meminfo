@@ -23,6 +23,53 @@ jobs:
           fi
           echo "extension/VERSION matches the tag"
 
+  oom-engines:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [legacy-runtime, backport-runtime, fpm-runtime]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the pinned OOM engine and verify its native behavior
+        run: |
+          docker build --build-arg RUNTIME=${{ matrix.runtime }} \
+            -f tools/repro/oom-hooks/Dockerfile -t meminfo-oom:${{ matrix.runtime }} .
+      - name: Test fatal-time and early capture contracts
+        shell: bash
+        run: |
+          docker run --name meminfo-oom-tests -e MEMINFO_TEST_KEEP_CHILD_OUTPUT=1 \
+            meminfo-oom:${{ matrix.runtime }} sh -c '
+              set -eu
+              cat oom-engine.json
+              REPORT_EXIT_STATUS=1 NO_INTERACTION=1 php run-tests.php -n \
+                -d extension=/src/extension/modules/meminfo.so \
+                tests/dump-on_limit.phpt tests/dump-on_threshold*.phpt > run-tests.log 2>&1 || {
+                  cat run-tests.log; exit 1;
+                }
+              cat run-tests.log
+              grep -E "PASS.*\[tests/dump-on_threshold_jit.phpt\]" run-tests.log
+              grep -E "PASS.*\[tests/dump-on_threshold_cleanup.phpt\]" run-tests.log
+              if [ -n "${MEMINFO_FPM_BINARY:-}" ]; then
+                php -n /src/tools/repro/oom-hooks/fpm.php
+              fi
+            '
+      - name: Collect OOM provenance and diagnostics
+        if: always()
+        run: |
+          mkdir -p oom-artifacts
+          docker cp meminfo-oom-tests:/src/extension/oom-engine.json oom-artifacts/ || true
+          docker cp meminfo-oom-tests:/src/extension/run-tests.log oom-artifacts/ || true
+          docker cp meminfo-oom-tests:/src/extension/tests oom-artifacts/tests || true
+          docker cp meminfo-oom-tests:/tmp oom-artifacts/children || true
+          docker rm -f meminfo-oom-tests || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: oom-${{ matrix.runtime }}
+          path: oom-artifacts/
+
   build:
     runs-on: ${{ matrix.os }}
     env:

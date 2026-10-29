@@ -357,7 +357,16 @@ static int meminfo_set_memory_limit(size_t limit)
     zend_set_memory_limit(limit);
     return 1;
 #else
+    if (zend_set_memory_limit(limit) != SUCCESS) {
+        return 0;
+    }
+#if PHP_VERSION_ID >= 80100 && PHP_VERSION_ID < 80200
+    // Some 8.1 builds return SUCCESS after freeing cached chunks without
+    // assigning heap->limit. A second call now fits and actually assigns it.
     return zend_set_memory_limit(limit) == SUCCESS;
+#else
+    return 1;
+#endif
 #endif
 }
 
@@ -403,11 +412,12 @@ static int meminfo_dump_file_finish(const char *request, const char *temp_path, 
 /**
  * Write the dump to a file, at a safe point in the VM.
  *
- * Nothing here may reach the output of the process being dumped: a stream
+ * Normal capture failures must not reach the process's output: a stream
  * notice or a user error handler firing in the middle of someone's response is
  * exactly the kind of interference this feature must not cause. Failures go to
- * the error log only. On success, the path of the dump is copied to out_path
- * when one is given.
+ * the error log only. If its memory limit cannot be restored, the request is
+ * aborted with a fatal diagnostic rather than allowed to run without a limit.
+ * On success, the path is copied to out_path when one is given.
  */
 static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, char *out_path, size_t out_size)
 {
@@ -588,7 +598,12 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, c
 
     // After the gc: the limit cannot be put back below what is in use.
     if (limit_lifted && !meminfo_set_memory_limit((size_t) PG(memory_limit))) {
-        php_log_err((char *) "meminfo: cannot restore memory_limit after the dump; it stays lifted");
+        // The walk is finished and the timer restored: abort this request at
+        // a consistent point rather than run application code without a limit.
+        // Do not start an upload on a path whose cleanup failed.
+        php_log_err((char *) "meminfo: cannot restore memory_limit after the dump; aborting request");
+        zend_error(E_ERROR, "meminfo: cannot restore memory_limit after the dump; aborting request");
+        zend_bailout();
     }
 
     // Last, once the process is back to normal: the upload runs in the
@@ -605,26 +620,31 @@ static void meminfo_dump_to_file(zend_execute_data *execute_data, int dump_id, c
  */
 static int meminfo_serve_dump_request(zend_execute_data *execute_data, char *out_path, size_t out_size)
 {
-    if (MEMINFO_G(dump_requested) && !MEMINFO_G(dumping)) {
+    if ((MEMINFO_G(dump_requested) || MEMINFO_G(threshold_pending)) && !MEMINFO_G(dumping)) {
         int dump_id;
+        int from_threshold = !MEMINFO_G(dump_requested);
 
-        // Cleared before anything else: a signal that arrives from here on
-        // leaves the flag set and produces one more dump afterwards, rather
-        // than being swallowed. Reading the id afterwards means a signal in
-        // that window is served by this dump instead of being lost.
-        MEMINFO_G(dump_requested) = 0;
-        dump_id = (int) MEMINFO_G(dump_id);
+        // A threshold must never write the signal slot: a signal can arrive
+        // between any two ordinary C statements. Prefer a queued signal and
+        // coalesce the threshold into it; otherwise leave later signals queued.
+        MEMINFO_G(threshold_pending) = 0;
+        dump_id = 0;
+        if (!from_threshold) {
+            MEMINFO_G(dump_requested) = 0;
+            // Reading the id after clearing the flag preserves the existing
+            // rule: a signal arriving in this window is served by this dump.
+            dump_id = (int) MEMINFO_G(dump_id);
+        }
 
         MEMINFO_G(dumping) = 1;
 
         // A request the code serves itself was waited for until a quiet point;
         // one served by the interrupt hook lands wherever the code was.
-        if (MEMINFO_G(request_from_threshold)) {
+        if (from_threshold) {
             MEMINFO_G(dump_trigger) = out_path != NULL ? "threshold (deferred)" : "threshold";
         } else {
             MEMINFO_G(dump_trigger) = out_path != NULL ? "deferred" : "signal";
         }
-        MEMINFO_G(request_from_threshold) = 0;
 
         meminfo_dump_to_file(execute_data, dump_id, out_path, out_size);
 
@@ -634,7 +654,7 @@ static int meminfo_serve_dump_request(zend_execute_data *execute_data, char *out
         // it after this dump started rejects this file by its timestamp and
         // asks again, so nothing is lost by dropping it. A request carrying an
         // id names its own file and is always kept.
-        if (dump_id == 0 && MEMINFO_G(dump_requested) && MEMINFO_G(dump_id) == 0) {
+        if (!from_threshold && dump_id == 0 && MEMINFO_G(dump_requested) && MEMINFO_G(dump_id) == 0) {
             MEMINFO_G(dump_requested) = 0;
         }
 
@@ -722,45 +742,76 @@ static void meminfo_error_cb(int type, const char *file, const uint32_t line, co
 #endif
 
 #if PHP_VERSION_ID >= 80000
+/** Parse the documented integer byte/K/M/G or 1..100% threshold syntax. */
+static int meminfo_threshold_parse(const char *setting, size_t *bytes, int *percent)
+{
+    char *end;
+    unsigned long long value;
+    size_t multiplier = 1;
+    int saved_errno = errno;
+    int overflow;
+
+    *bytes = 0;
+    *percent = 0;
+    if (setting == NULL || setting[0] == '\0') {
+        return 1;
+    }
+    if (setting[0] < '0' || setting[0] > '9') {
+        return 0;
+    }
+    errno = 0;
+    value = strtoull(setting, &end, 10);
+    overflow = errno == ERANGE;
+    errno = saved_errno;
+    if (overflow) {
+        return 0;
+    }
+    if (*end == '%') {
+        if (end[1] != '\0' || value == 0 || value > 100) {
+            return 0;
+        }
+        *percent = (int) value;
+        return 1;
+    }
+    if (*end != '\0') {
+        if (end[1] != '\0') {
+            return 0;
+        }
+        switch (*end) {
+            case 'g': case 'G': multiplier = (size_t) 1 << 30; break;
+            case 'm': case 'M': multiplier = (size_t) 1 << 20; break;
+            case 'k': case 'K': multiplier = (size_t) 1 << 10; break;
+            default: return 0;
+        }
+    }
+    if (value > SIZE_MAX / multiplier) {
+        return 0;
+    }
+    *bytes = (size_t) value * multiplier;
+    return 1;
+}
+
 /**
  * The threshold in bytes for this request: "512M", "1G", "64K", a byte count,
  * or a percentage of memory_limit ("80%"). 0 when unset or meaningless.
  */
 static size_t meminfo_threshold_bytes(void)
 {
-    const char *setting = MEMINFO_G(dump_threshold);
-    size_t length;
+    size_t bytes;
+    int percent;
 
-    if (setting == NULL || setting[0] == '\0') {
+    if (!meminfo_threshold_parse(MEMINFO_G(dump_threshold), &bytes, &percent)) {
         return 0;
     }
-
-    length = strlen(setting);
-    if (setting[length - 1] == '%') {
-        zend_long percent = ZEND_STRTOL(setting, NULL, 10);
-
-        return PG(memory_limit) > 0 && percent > 0 ? (size_t) PG(memory_limit) / 100 * (size_t) percent : 0;
+    if (percent != 0) {
+        return PG(memory_limit) > 0 ? (size_t) PG(memory_limit) / 100 * (size_t) percent : 0;
     }
-
-    {
-        char *end = NULL;
-        unsigned long long value = strtoull(setting, &end, 10);
-
-        switch (end != NULL ? *end : '\0') {
-            case 'g': case 'G': value <<= 30; break;
-            case 'm': case 'M': value <<= 20; break;
-            case 'k': case 'K': value <<= 10; break;
-            default: break;
-        }
-
-        return (size_t) value;
-    }
+    return bytes;
 }
 
 /**
  * Called on every function call while a threshold is set: one comparison.
- * 8.0 and 8.1 observe calls of user functions only, 8.2 and later internal
- * ones as well.
+ * User-call observers and completed internal calls share the same accounting.
  * Crossing it requests a dump the way a signal does, served at the next safe
  * point (or by meminfo_dump_if_requested() with meminfo.dump_defer).
  */
@@ -769,9 +820,15 @@ static void meminfo_threshold_check(zend_execute_data *execute_data)
     size_t threshold;
 
     (void) execute_data;
-    if (MEMINFO_G(threshold_crossed) || MEMINFO_G(dumping)) {
+    if (MEMINFO_G(threshold_crossed) || MEMINFO_G(dumping)
+        || EG(exception) != NULL || CG(in_compilation) || (EG(flags) & EG_FLAGS_IN_SHUTDOWN)) {
         return;
     }
+#ifdef ZEND_HAS_OOM
+    if (ZEND_HAS_OOM()) {
+        return;
+    }
+#endif
 
     // Parsed once per memory_limit, not on every call.
     if (MEMINFO_G(threshold_limit_seen) != PG(memory_limit)) {
@@ -784,13 +841,9 @@ static void meminfo_threshold_check(zend_execute_data *execute_data)
     }
 
     MEMINFO_G(threshold_crossed) = 1;
-    // A request already pending (a trigger waiting for the dump it named by
-    // id) is served by the same dump; its id must not be replaced.
-    if (!MEMINFO_G(dump_requested)) {
-        MEMINFO_G(dump_id) = 0;
-        MEMINFO_G(request_from_threshold) = 1;
-    }
-    MEMINFO_G(dump_requested) = 1;
+    // The signal slot is owned solely by its handler. Setting a separate PHP
+    // slot cannot overwrite an id delivered asynchronously by sigqueue().
+    MEMINFO_G(threshold_pending) = 1;
 #if PHP_VERSION_ID >= 80200
     zend_atomic_bool_store_ex(&EG(vm_interrupt), true);
 #else
@@ -799,12 +852,38 @@ static void meminfo_threshold_check(zend_execute_data *execute_data)
     php_log_err((char *) "meminfo: memory usage passed meminfo.dump_threshold, dumping");
 }
 
+static void meminfo_threshold_end(zend_execute_data *execute_data, zval *return_value)
+{
+    (void) return_value;
+    meminfo_threshold_check(execute_data);
+}
+
 static zend_observer_fcall_handlers meminfo_threshold_observer(zend_execute_data *execute_data)
 {
-    zend_observer_fcall_handlers handlers = { meminfo_threshold_check, NULL };
+    zend_observer_fcall_handlers handlers = { meminfo_threshold_check, meminfo_threshold_end };
 
-    (void) execute_data;
+    // Internal calls use the execution hook on every version: JIT can bypass
+    // internal fcall observers even where the interpreter supports them.
+    if (execute_data != NULL && execute_data->func != NULL && execute_data->func->type == ZEND_INTERNAL_FUNCTION) {
+        handlers.begin = NULL;
+        handlers.end = NULL;
+    }
     return handlers;
+}
+
+/* Internal observers are not uniformly called by the interpreter and JIT.
+ * Chain the execution hook at module startup; JIT can embed its address in
+ * generated code. Never dump in this call frame or change the native MM. */
+static void (*meminfo_previous_execute_internal)(zend_execute_data *, zval *) = NULL;
+
+static void meminfo_threshold_execute_internal(zend_execute_data *execute_data, zval *return_value)
+{
+    if (meminfo_previous_execute_internal != NULL) {
+        meminfo_previous_execute_internal(execute_data, return_value);
+    } else {
+        execute_internal(execute_data, return_value);
+    }
+    meminfo_threshold_check(execute_data);
 }
 #endif
 
@@ -815,7 +894,8 @@ static zend_observer_fcall_handlers meminfo_threshold_observer(zend_execute_data
  */
 static void meminfo_interrupt_handler(zend_execute_data *execute_data)
 {
-    if (!MEMINFO_G(dump_defer)) {
+    if (!MEMINFO_G(dump_defer) && (MEMINFO_G(dump_requested)
+        || (EG(exception) == NULL && !CG(in_compilation) && !(EG(flags) & EG_FLAGS_IN_SHUTDOWN)))) {
         meminfo_serve_dump_request(execute_data, NULL, 0);
     }
 
@@ -887,6 +967,20 @@ void meminfo_signal_module_startup(void)
     meminfo_dump_debug_enabled = debug != NULL && strcmp(debug, "1") == 0;
     meminfo_dump_debug("module-startup");
 
+#if PHP_VERSION_ID >= 80000
+    if (threshold) {
+        size_t bytes;
+        int percent;
+
+        if (!meminfo_threshold_parse(MEMINFO_G(dump_threshold), &bytes, &percent)) {
+            php_log_err((char *) "meminfo: invalid meminfo.dump_threshold; expected bytes, K/M/G or 1..100%; threshold disabled");
+            threshold = 0;
+        } else {
+            threshold = bytes != 0 || percent != 0;
+        }
+    }
+#endif
+
     if (MEMINFO_G(dump_signal) != 0 || threshold) {
         meminfo_previous_interrupt_function = zend_interrupt_function;
         zend_interrupt_function = meminfo_interrupt_handler;
@@ -907,6 +1001,9 @@ void meminfo_signal_module_startup(void)
     if (threshold) {
 #if PHP_VERSION_ID >= 80000
         zend_observer_fcall_register(meminfo_threshold_observer);
+        meminfo_previous_execute_internal = zend_execute_internal;
+        zend_execute_internal = meminfo_threshold_execute_internal;
+        meminfo_dump_debug("threshold-hooks-installed");
 #else
         php_log_err((char *) "meminfo: meminfo.dump_threshold needs PHP 8.0 or later; it is ignored");
 #endif
@@ -918,6 +1015,11 @@ void meminfo_signal_module_startup(void)
  */
 void meminfo_signal_module_shutdown(void)
 {
+#if PHP_VERSION_ID >= 80000
+    if (zend_execute_internal == meminfo_threshold_execute_internal) {
+        zend_execute_internal = meminfo_previous_execute_internal;
+    }
+#endif
     if (zend_interrupt_function == meminfo_interrupt_handler) {
         zend_interrupt_function = meminfo_previous_interrupt_function;
     }
@@ -934,9 +1036,10 @@ void meminfo_signal_module_shutdown(void)
  */
 MEMINFO_HIDDEN void meminfo_report_unserved_request(void)
 {
-    if (MEMINFO_G(dump_defer) && MEMINFO_G(dump_requested)) {
+    if (MEMINFO_G(dump_defer) && (MEMINFO_G(dump_requested) || MEMINFO_G(threshold_pending))) {
         php_log_err((char *) "meminfo: a dump was requested but meminfo_dump_if_requested() was not called before the request ended (meminfo.dump_defer=1)");
         MEMINFO_G(dump_requested) = 0;
+        MEMINFO_G(threshold_pending) = 0;
     }
 }
 

@@ -299,10 +299,34 @@ when such a dump, or one taken on a signal or a threshold without `dump_defer`, 
 comparison. The threshold has no such limit: with `dump_defer` it waits for the next
 `meminfo_dump_if_requested()` (`"trigger": "threshold (deferred)"`).
 
-The threshold is checked on function calls through an observer, which is registered only when the
-setting is set. On PHP 8.0 and 8.1 the observer sees only calls to user functions; from 8.2 it sees
-internal calls too. Before 8.0 the setting is ignored. `dump_on_limit` works from PHP 7.1, like
-signal dumps.
+The threshold compares used PHP memory (`memory_get_usage(false)`), not reserved pages or RSS.
+On PHP 8.0+ it is checked around user-function calls and after completed internal calls, including
+the allocating calls in a `str_repeat()` loop. The internal execution hook is installed at module
+startup so traced JIT code can use it; Zend's allocator and GC remain unchanged. The hook only
+requests a dump: traversal runs later through the existing VM interrupt. Operations inlined by
+the VM/JIT and allocation loops with no function calls can still miss the threshold.
+
+Empty or `0` disables threshold observation. Values are integer bytes, a K/M/G suffix, or 1..100%
+of a finite positive `memory_limit`; an absolute threshold also works with an unlimited limit.
+Invalid/overflowing startup settings are diagnosed and disabled. A crossing attempts capture once
+per request, including a failed attempt; there is no allocation-by-allocation retry. Percentage
+thresholds are recomputed when `memory_limit` changes. Before PHP 8.0 the setting is ignored.
+`dump_on_limit` needs PHP 7.1 or later,
+like signal dumps, and an engine that reports the memory error to Zend observers/error callbacks.
+
+Some security-backported EOL PHP builds terminate memory-limit failures through `_exit(1)`
+without those callbacks or PHP shutdown. On those builds `dump_on_limit` cannot produce the
+fatal-time dump, and pending S3 uploads are not drained at shutdown. A separately configured
+`dump_threshold` can capture an earlier state, but it is best effort: the observer can miss
+allocations between calls, and a single large allocation may terminate before a safe point.
+An early dump has trigger `threshold`, not `memory_limit`. PHP's version number alone does not
+identify downstream backports. See [OOM compatibility](development.md#oom-engine-compatibility).
+
+For early evidence on an immediate-exit engine, explicitly enable a threshold with headroom,
+for example `meminfo.dump_threshold=80%`. This does not turn `dump_on_limit` into an early capture
+setting. If restoring the application's memory limit after traversal fails, meminfo logs the
+failure and aborts the request instead of letting it continue with a lifted limit. Ordinary
+capture/write failures are logged, remove the partial file, and let the application continue.
 
 Uploading dumps to S3
 ---------------------
@@ -382,12 +406,13 @@ contents of the process.
 3. Once it is over, a record is written next to the dump: `<dump>.json.uploaded` holding the
    `s3://` location, or `<dump>.json.upload-error` holding the reason. The outcome is also logged,
    at the next request start or end, dump, `meminfo_dump_if_requested()` or exit.
-4. A process that exits waits up to `meminfo.dump_upload_timeout` for uploads still running, then
+4. A process that reaches module shutdown waits up to `meminfo.dump_upload_timeout` for uploads still running, then
    gives up; their dumps stay local, with an `.upload-error`. A process killed outright (SIGKILL, the
    OOM killer) loses an upload in flight, never the local file.
 
-A dump on `memory_limit` is uploaded too: an FPM worker survives the fatal error and finishes the
-upload in the background, and the CLI waits for it on its way out.
+A dump on `memory_limit` is uploaded too when the engine reports the fatal error and follows
+normal shutdown: an FPM worker can finish the upload in the background, and the CLI waits for it
+on its way out. Immediate `_exit` paths skip that drain; see the memory-pressure limitations above.
 
 `dump-meminfo --wait-upload` (`'wait_upload' => true` for `meminfo_dump_process()`) waits for the
 record after the dump and prints the `s3://` location, or fails with the target's reason. With

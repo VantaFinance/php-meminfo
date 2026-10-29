@@ -146,8 +146,8 @@ non-ZTS, POSIX. Elsewhere they are ignored with a warning at startup.
 | `meminfo.dump_signal` | `SIGURG` | Signal the process dumps on, by name or number. `0` or empty disables it. |
 | `meminfo.dump_dir` | system temp dir | Where dumps are written unless the trigger passes `--dir`. |
 | `meminfo.dump_defer` | `0` | A dump signal only records the request; the dump is written when the code calls `meminfo_dump_if_requested()` (between two jobs of a worker). |
-| `meminfo.dump_on_limit` | `0` | Write a dump when `memory_limit` is reached, before the fatal error ends the request. |
-| `meminfo.dump_threshold` | empty | Write one dump per request once memory usage passes it: `512M`, `1G`, or `80%` of `memory_limit` (PHP 8.0+). |
+| `meminfo.dump_on_limit` | `0` | Capture a reported memory-limit fatal before the request ends. Engines that terminate directly through `_exit` cannot provide this callback. |
+| `meminfo.dump_threshold` | empty | Attempt one early dump per request after used PHP memory crosses it: `512M`, `1G`, or `80%` of a finite `memory_limit` (PHP 8.0+). |
 | `meminfo.dump_unreachable` | `0` | Default of the `unreachable` dump option, for dumps taken on a signal or a limit. |
 | `meminfo.dump_string_hashes` | `0` | Default of the `string_hashes` dump option, likewise. |
 | `meminfo.auto_mark` | `0` | Every dump starts a new [generation](#generations-and-histograms) first. |

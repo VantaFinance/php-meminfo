@@ -261,7 +261,7 @@ static PHP_RINIT_FUNCTION(meminfo)
     MEMINFO_G(dump_requested) = 0;
     MEMINFO_G(dump_id) = 0;
     MEMINFO_G(dumping) = 0;
-    MEMINFO_G(request_from_threshold) = 0;
+    MEMINFO_G(threshold_pending) = 0;
 
     meminfo_install_signal_handler();
     meminfo_upload_poll();

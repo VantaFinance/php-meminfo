@@ -149,8 +149,8 @@ ZEND_BEGIN_MODULE_GLOBALS(meminfo)
     int dump_flags;
     /* what the dump being written was taken on, for the header: "call", "signal", … */
     const char *dump_trigger;
-    /* the pending request comes from the threshold, not from a signal */
-    zend_bool request_from_threshold;
+    /* PHP-thread-only threshold slot; never overwrite a signal's pending id. */
+    zend_bool threshold_pending;
     /* ini: every dump marks a new generation first */
     zend_bool auto_mark;
     /* ini: a dump signal waits for meminfo_dump_if_requested() */

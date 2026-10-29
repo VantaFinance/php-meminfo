@@ -1,20 +1,23 @@
 --TEST--
-A dump taken when memory_limit is reached is uploaded although the request dies: the process waits for it at exit
+fatal-time S3 capture follows independently verified native OOM lifecycle
 --SKIPIF--
 <?php
     require __DIR__ . '/fixtures/s3_helpers.php';
     $reason = meminfo_test_s3_skip_reason();
     if ($reason !== null) die('skip ' . $reason);
+    if (getenv('USE_ZEND_ALLOC') === '0') die('skip memory_limit requires Zend MM');
 ?>
 --FILE--
 <?php
     require __DIR__ . '/fixtures/s3_helpers.php';
 
     meminfo_test_s3_ensure_bucket();
+    $native = meminfo_test_native_oom_behavior();
 
     $dir = meminfo_test_make_dump_dir();
     $child = meminfo_test_spawn('
         class LimitMarker {}
+        register_shutdown_function(function () { fwrite(STDERR, "MEMINFO_NATIVE_SHUTDOWN\n"); });
         $marker = new LimitMarker();
         $grow = array();
         while (true) {
@@ -25,10 +28,22 @@ A dump taken when memory_limit is reached is uploaded although the request dies:
         'meminfo.dump_on_limit' => '1',
         'memory_limit'          => '16M',
     )));
-    proc_close($child['process']);
+    $status = meminfo_test_finish_child($child);
 
     $output = file_get_contents($child['stdout']) . file_get_contents($child['stderr']);
     echo 'ended with the memory error: ', strpos($output, 'Allowed memory size') !== false ? 'yes' : 'no', "\n";
+    echo 'native lifecycle preserved: ', $status === $native['status']
+        && (strpos($output, 'MEMINFO_NATIVE_SHUTDOWN') !== false) === $native['shutdown'] ? 'yes' : 'no', "\n";
+
+    if ($native['immediate_exit']) {
+        $log = is_file($child['error_log']) ? file_get_contents($child['error_log']) : '';
+        echo "fatal callback unavailable: native immediate exit\n";
+        echo 'dump and upload artifacts: ', count(glob($dir . '/*')), "\n";
+        echo 'shutdown drain absent: ', strpos($log, 'meminfo: waiting up to') === false ? 'yes' : 'no', "\n";
+        meminfo_test_cleanup($child);
+        meminfo_test_remove_dir($dir);
+        return;
+    }
 
     $dumps = glob($dir . '/meminfo-*.json');
     echo 'dumps: ', count($dumps), "\n";
@@ -52,13 +67,16 @@ A dump taken when memory_limit is reached is uploaded although the request dies:
     array_map('unlink', glob($dir . '/*'));
     meminfo_test_remove_dir($dir);
 ?>
---EXPECT--
+--EXPECTREGEX--
 ended with the memory error: yes
-dumps: 1
+native lifecycle preserved: yes
+(?:fatal callback unavailable: native immediate exit
+dump and upload artifacts: 0
+shutdown drain absent: yes|dumps: 1
 uploaded before the process exited: yes
 GET: 200
 trigger: memory_limit
 header trigger: memory_limit
 log: dump written, upload in the background: yes
 log: waited at exit: yes
-log: uploaded: yes
+log: uploaded: yes)

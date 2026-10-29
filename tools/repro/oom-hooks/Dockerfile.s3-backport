@@ -1,0 +1,22 @@
+# Reuse the tested CRT toolchain, but run the exact EOL PHP mitigation source.
+# Build the S3 image first, then build this file from the repository root.
+ARG S3_BASE=meminfo-s3:oom-8.4
+FROM ${S3_BASE}
+RUN set -eu; apt-get update; apt-get install -y --no-install-recommends bison re2c; \
+    rm -rf /var/lib/apt/lists/*
+ARG PHP_SOURCE_COMMIT=1d7dec178a094e6e75b229ce22754045f8c6070a
+RUN set -eu; mkdir /opt/php-oom-src; cd /opt/php-oom-src; \
+    git init -q; git fetch -q --depth 1 https://github.com/php/php-src.git "$PHP_SOURCE_COMMIT"; \
+    git checkout -q FETCH_HEAD; test "$(git rev-parse HEAD)" = "$PHP_SOURCE_COMMIT"; \
+    ./buildconf --force; \
+    ./configure --prefix=/opt/php-oom81 --disable-all --enable-cli --enable-pcntl --enable-session --without-pear; \
+    make -j4; make install
+ENV PATH=/opt/php-oom81/bin:$PATH MEMINFO_S3=/opt/meminfo-s3
+COPY extension/ /src/extension/
+COPY tools/repro/oom-hooks/verify-engine.php /src/tools/repro/oom-hooks/verify-engine.php
+WORKDIR /src
+RUN set -eu; make -C extension distclean; \
+    make build; \
+    php -n /src/tools/repro/oom-hooks/verify-engine.php immediate-exit > /src/extension/oom-engine.json; \
+    cat /src/extension/oom-engine.json
+CMD ["php", "-n", "-d", "extension=/src/extension/modules/meminfo.so", "--ri", "meminfo"]
