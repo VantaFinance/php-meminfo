@@ -894,8 +894,15 @@ static void meminfo_threshold_execute_internal(zend_execute_data *execute_data, 
  */
 static void meminfo_interrupt_handler(zend_execute_data *execute_data)
 {
-    if (!MEMINFO_G(dump_defer) && (MEMINFO_G(dump_requested)
-        || (EG(exception) == NULL && !CG(in_compilation) && !(EG(flags) & EG_FLAGS_IN_SHUTDOWN)))) {
+    int can_serve = 1;
+
+#if PHP_VERSION_ID >= 80000
+    // Only PHP 8+ has threshold requests. PHP 7.1 has no EG(flags), and its
+    // explicit signal dumps must retain their original shutdown behavior.
+    can_serve = MEMINFO_G(dump_requested)
+        || (EG(exception) == NULL && !CG(in_compilation) && !(EG(flags) & EG_FLAGS_IN_SHUTDOWN));
+#endif
+    if (!MEMINFO_G(dump_defer) && can_serve) {
         meminfo_serve_dump_request(execute_data, NULL, 0);
     }
 

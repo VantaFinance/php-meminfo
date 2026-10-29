@@ -45,7 +45,7 @@ jobs:
               cat oom-engine.json
               REPORT_EXIT_STATUS=1 NO_INTERACTION=1 php run-tests.php -n \
                 -d extension=/src/extension/modules/meminfo.so \
-                tests/dump-on_limit.phpt tests/dump-on_threshold*.phpt > run-tests.log 2>&1 || {
+                tests/dump-bailout_mid_walk.phpt tests/dump-on_limit.phpt tests/dump-on_threshold*.phpt > run-tests.log 2>&1 || {
                   cat run-tests.log; exit 1;
                 }
               cat run-tests.log
