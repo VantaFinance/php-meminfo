@@ -225,6 +225,13 @@ function meminfo_test_spawn($code, array $iniOptions = array(), $withExtension =
 
     $command = escapeshellarg(meminfo_test_php_binary()) . ' -n';
 
+    // A wrapper for the child, e.g. valgrind (make s3-test-valgrind); trusted:
+    // it comes from whoever runs the suite.
+    $prefix = getenv('MEMINFO_TEST_CHILD_PREFIX');
+    if ($prefix !== false && $prefix !== '') {
+        $command = $prefix . ' ' . $command;
+    }
+
     if ($withExtension) {
         $command .= ' -d ' . escapeshellarg('extension=' . meminfo_test_extension_path());
     }
@@ -416,6 +423,11 @@ function meminfo_test_cleanup(array $child, $pid = 0)
     }
 
     foreach (array('pid_file', 'script', 'stdout', 'stderr', 'error_log') as $key) {
+        // CI collects child output after run-tests.php has reported a failure.
+        // Keep the pid cleanup unchanged so process checks never see stale pids.
+        if ($key !== 'pid_file' && getenv('MEMINFO_TEST_KEEP_CHILD_OUTPUT') === '1') {
+            continue;
+        }
         @unlink($child[$key]);
     }
 }
@@ -485,4 +497,62 @@ function meminfo_test_frame_of(array $items, $symbol)
     }
 
     return null;
+}
+
+/** Reap a child with a deadline; preserve the first exit status on PHP < 8.3. */
+function meminfo_test_finish_child(array $child, $timeoutSeconds = 15)
+{
+    $deadline = microtime(true) + $timeoutSeconds;
+    while (microtime(true) < $deadline) {
+        $status = proc_get_status($child['process']);
+        if (!$status['running']) {
+            $closed = proc_close($child['process']);
+            return $status['exitcode'] >= 0 ? $status['exitcode'] : $closed;
+        }
+        usleep(10000);
+    }
+    if (isset($child['pid_file']) && is_file($child['pid_file'])) {
+        $pid = (int) file_get_contents($child['pid_file']);
+        if ($pid > 0) {
+            meminfo_test_signal_pid($pid, 9);
+        }
+    }
+    proc_terminate($child['process'], 9);
+    proc_close($child['process']);
+    throw new RuntimeException('error: child PHP timed out: ' . $child['script']);
+}
+
+/**
+ * Classify the actual engine using an independent child WITHOUT meminfo.
+ * Unknown behavior fails the test; no version-based skip or missing-dump fallback.
+ */
+function meminfo_test_native_oom_behavior()
+{
+    if (getenv('USE_ZEND_ALLOC') === '0') {
+        throw new RuntimeException('error: native OOM control requires Zend MM');
+    }
+    $child = meminfo_test_spawn('
+        register_shutdown_function(function () { fwrite(STDERR, "MEMINFO_NATIVE_SHUTDOWN\n"); });
+        $grow = array();
+        while (true) { $grow[] = str_repeat("x", 1024); }
+    ', array('memory_limit' => '16M'), false);
+    $status = meminfo_test_finish_child($child);
+    $output = file_get_contents($child['stdout']) . file_get_contents($child['stderr']);
+    $shutdown = strpos($output, 'MEMINFO_NATIVE_SHUTDOWN') !== false;
+    $memoryError = strpos($output, 'Allowed memory size') !== false;
+    meminfo_test_cleanup($child);
+    if (!$memoryError || !($status === 1 && !$shutdown || $status === 255 && $shutdown)) {
+        throw new RuntimeException('error: unexpected native OOM control: ' . json_encode(array(
+            'status' => $status, 'shutdown' => $shutdown, 'memory_error' => $memoryError)));
+    }
+    return array('status' => $status, 'immediate_exit' => $status === 1, 'shutdown' => $shutdown);
+}
+
+/** Identical OPcache settings for the native JIT control and tested child. */
+function meminfo_test_jit_options()
+{
+    return array('zend_extension' => ini_get('extension_dir') . '/opcache.so',
+        'opcache.enable_cli' => '1', 'opcache.jit_buffer_size' => '32M',
+        'opcache.jit' => 'tracing', 'opcache.jit_hot_loop' => '1',
+        'opcache.jit_hot_func' => '1', 'opcache.file_update_protection' => '0');
 }

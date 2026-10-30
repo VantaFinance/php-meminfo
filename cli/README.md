@@ -6,11 +6,14 @@ prints its path. It is a thin wrapper over `meminfo_dump_process()` of the
 
 ```bash
 composer require --dev vanta/dump-meminfo
-vendor/bin/dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force] [--count=N] [--interval=TIME]
+vendor/bin/dump-meminfo <pid> [--dir=DIR] [--signal=SIG] [--timeout=SEC] [--force] [--count=N] [--interval=TIME] [--wait-upload]
 ```
 
 `--count=3 --interval=5m` takes a series of dumps and prints their paths in order. Opened together in
 the browser UI, they show what grows at every step and the objects left behind between the first two.
+
+`--wait-upload` is for a target that uploads its dumps to S3 (`meminfo.dump_upload`): it waits for the
+upload and prints the `s3://` location instead of the local path, or fails with the target's reason.
 
 The command needs the meminfo extension loaded, and so does the process it dumps. Install the
 extension with [PIE](https://github.com/php/pie):

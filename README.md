@@ -113,6 +113,10 @@ $ make build PHPIZE=/usr/local/php-7.4/bin/phpize PHP_CONFIG=/usr/local/php-7.4/
 The reported version and copyright year are build arguments (`make build MEMINFO_VERSION=2.1.0`); see
 [Development](doc/development.md#version-and-copyright-year).
 
+Uploading dumps to S3 is optional: `make vcpkg-install` fetches aws-c-s3 with [vcpkg](https://vcpkg.io)
+(`vcpkg.json`), then `make build MEMINFO_S3=vcpkg_installed/<triplet>` links it in (`./configure
+--with-meminfo-s3=DIR` without Make). See [Building with S3](doc/process_dump.md#building-with-s3).
+
 Without Make, from the `extension` directory:
 
 ```bash
@@ -142,12 +146,13 @@ non-ZTS, POSIX. Elsewhere they are ignored with a warning at startup.
 | `meminfo.dump_signal` | `SIGURG` | Signal the process dumps on, by name or number. `0` or empty disables it. |
 | `meminfo.dump_dir` | system temp dir | Where dumps are written unless the trigger passes `--dir`. |
 | `meminfo.dump_defer` | `0` | A dump signal only records the request; the dump is written when the code calls `meminfo_dump_if_requested()` (between two jobs of a worker). |
-| `meminfo.dump_on_limit` | `0` | Write a dump when `memory_limit` is reached, before the fatal error ends the request. |
-| `meminfo.dump_threshold` | empty | Write one dump per request once memory usage passes it: `512M`, `1G`, or `80%` of `memory_limit` (PHP 8.0+). |
+| `meminfo.dump_on_limit` | `0` | Capture a reported memory-limit fatal before the request ends. Engines that terminate directly through `_exit` cannot provide this callback. |
+| `meminfo.dump_threshold` | empty | Attempt one early dump per request after used PHP memory crosses it: `512M`, `1G`, or `80%` of a finite `memory_limit` (PHP 8.0+). |
 | `meminfo.dump_unreachable` | `0` | Default of the `unreachable` dump option, for dumps taken on a signal or a limit. |
 | `meminfo.dump_string_hashes` | `0` | Default of the `string_hashes` dump option, likewise. |
 | `meminfo.auto_mark` | `0` | Every dump starts a new [generation](#generations-and-histograms) first. |
 | `meminfo.track_allocations` | `0` | Record the line of the `new` that created each object. It costs about 6 ns per `new`, and the opcache JIT does not run while it is on. |
+| `meminfo.dump_upload` | empty | `s3://bucket[/prefix]`: also upload every dump the process writes on its own, in the background. Needs a build with `--with-meminfo-s3`; `meminfo.dump_upload_keep_local`, `meminfo.dump_upload_timeout` and `meminfo.s3_region` / `s3_endpoint` / `s3_path_style` go with it — see [Uploading dumps to S3](doc/process_dump.md#uploading-dumps-to-s3). |
 
 `php -i | grep meminfo` shows what a build resolved. Details, and why `SIGURG`, are in
 [Dumping a running process](doc/process_dump.md#settings).
@@ -208,7 +213,9 @@ serving a request can be dumped — take its pid from the status page, never the
 
 A worker can also dump itself: at a quiet point between two jobs (`meminfo.dump_defer`), when
 `memory_limit` is reached (`meminfo.dump_on_limit`), or once memory usage passes a threshold
-(`meminfo.dump_threshold`). Errors, settings, worker recipes, FPM, containers, security and
+(`meminfo.dump_threshold`). Those dumps can also be [uploaded to S3](doc/process_dump.md#uploading-dumps-to-s3)
+(`meminfo.dump_upload`), so a dump outlives an ephemeral pod; `dump-meminfo --wait-upload` then
+prints the `s3://` location. Errors, settings, worker recipes, FPM, containers, security and
 limitations are covered in [Dumping a running process](doc/process_dump.md).
 
 ### Analyzing a dump in the browser

@@ -23,8 +23,57 @@ jobs:
           fi
           echo "extension/VERSION matches the tag"
 
+  oom-engines:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [legacy-runtime, backport-runtime, fpm-runtime]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the pinned OOM engine and verify its native behavior
+        run: |
+          docker build --build-arg RUNTIME=${{ matrix.runtime }} \
+            -f tools/repro/oom-hooks/Dockerfile -t meminfo-oom:${{ matrix.runtime }} .
+      - name: Test fatal-time and early capture contracts
+        shell: bash
+        run: |
+          docker run --name meminfo-oom-tests -e MEMINFO_TEST_KEEP_CHILD_OUTPUT=1 \
+            meminfo-oom:${{ matrix.runtime }} sh -c '
+              set -eu
+              cat oom-engine.json
+              REPORT_EXIT_STATUS=1 NO_INTERACTION=1 php run-tests.php -n \
+                -d extension=/src/extension/modules/meminfo.so \
+                tests/dump-bailout_mid_walk.phpt tests/dump-on_limit.phpt tests/dump-on_threshold*.phpt > run-tests.log 2>&1 || {
+                  cat run-tests.log; exit 1;
+                }
+              cat run-tests.log
+              grep -E "PASS.*\[tests/dump-on_threshold_jit.phpt\]" run-tests.log
+              grep -E "PASS.*\[tests/dump-on_threshold_cleanup.phpt\]" run-tests.log
+              if [ -n "${MEMINFO_FPM_BINARY:-}" ]; then
+                php -n /src/tools/repro/oom-hooks/fpm.php
+              fi
+            '
+      - name: Collect OOM provenance and diagnostics
+        if: always()
+        run: |
+          mkdir -p oom-artifacts
+          docker cp meminfo-oom-tests:/src/extension/oom-engine.json oom-artifacts/ || true
+          docker cp meminfo-oom-tests:/src/extension/run-tests.log oom-artifacts/ || true
+          docker cp meminfo-oom-tests:/src/extension/tests oom-artifacts/tests || true
+          docker cp meminfo-oom-tests:/tmp oom-artifacts/children || true
+          docker rm -f meminfo-oom-tests || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: oom-${{ matrix.runtime }}
+          path: oom-artifacts/
+
   build:
     runs-on: ${{ matrix.os }}
+    env:
+      MEMINFO_TEST_KEEP_CHILD_OUTPUT: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -134,12 +183,14 @@ jobs:
       # already loads protobuf. make test works on PHP 8.
       - name: Test the extension (PHP 7)
         if: startsWith(matrix.php-versions, '7.')
+        shell: bash
         run: |
           cd extension/
           REPORT_EXIT_STATUS=1 NO_INTERACTION=1 TEST_PHP_EXECUTABLE=$(which php) $(which php) run-tests.php -d extension=$PWD/modules/meminfo.so | tee run-tests.log
 
       - name: Test the extension (PHP 8)
         if: startsWith(matrix.php-versions, '8.')
+        shell: bash
         run: |
           cd extension/
           REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test TESTS="-d extension=$PROTOBUF_SO tests/" | tee run-tests.log
@@ -158,6 +209,10 @@ jobs:
           grep -E '(PASS|FAIL).*tests/dump-signal_process_dir\.phpt' extension/run-tests.log
           grep -E '(PASS|FAIL).*tests/dump-signal_process_series\.phpt' extension/run-tests.log
 
+      - name: Diagnose failed extension tests
+        if: failure()
+        run: bash tools/ci/diagnose-extension-tests.sh
+
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
@@ -165,6 +220,11 @@ jobs:
           path: |
             extension/tests/*.out
             extension/tests/*.diff
+            extension/tests/*.exp
+            extension/tests/*.log
+            extension/run-tests.log
+            extension/config.log
+            extension/test-diagnostics/
 
   # ext-swoole, so the Swoole tests run instead of skipping, plus the coroutine
   # scenarios of tools/repro/swoole (dumps from inside a coroutine, 10 000
@@ -193,6 +253,149 @@ jobs:
 
       - name: Run the Swoole scenarios
         run: make repro-swoole PHP_VERSION=${{ matrix.php-versions }}
+
+  # The S3 transport (--with-meminfo-s3): aws-c-s3 from vcpkg at the baseline
+  # of vcpkg.json, the .phpt suite against a throwaway S3-compatible server
+  # (versitygw; MinIO no longer publishes images), with the dump-s3_* tests
+  # required to run. One entry without sigqueue() exercises the trigger's
+  # kill() path with upload records; macOS only checks that it builds and
+  # links (frameworks instead of s2n/OpenSSL symbols hiding).
+  s3:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        php-versions: ['7.4', '8.1', '8.4']
+        sigqueue: ['yes']
+        os: ['ubuntu-22.04']
+        include:
+          - php-versions: '8.1'
+            sigqueue: 'no'
+            os: 'ubuntu-22.04'
+          - php-versions: '8.4'
+            sigqueue: 'yes'
+            os: 'macos-latest'
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/../vcpkg
+      VCPKG_DISABLE_METRICS: '1'
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/../vcpkg-cache
+      S3_GATEWAY_IMAGE: versity/versitygw:v1.10.0
+      AWS_ACCESS_KEY_ID: meminfo-test
+      AWS_SECRET_ACCESS_KEY: meminfo-test-secret
+      AWS_REGION: us-east-1
+      MEMINFO_TEST_KEEP_CHILD_OUTPUT: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-versions }}
+          extensions: posix, json, pcntl
+          coverage: none
+
+      - name: Check out vcpkg at the baseline of vcpkg.json
+        run: |
+          baseline=$(php -r 'echo json_decode(file_get_contents("vcpkg.json"), true)["builtin-baseline"];')
+          git init -q "$VCPKG_ROOT"
+          git -C "$VCPKG_ROOT" fetch -q --depth 1 https://github.com/microsoft/vcpkg.git "$baseline"
+          git -C "$VCPKG_ROOT" checkout -q FETCH_HEAD
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Install aws-c-s3 with vcpkg
+        run: make vcpkg-install VCPKG_ROOT="$VCPKG_ROOT"
+
+      - name: Build the extension with S3
+        run: |
+          prefix=$(ls -d "$PWD"/vcpkg_installed/*-linux "$PWD"/vcpkg_installed/*-osx 2>/dev/null | head -1)
+          echo "MEMINFO_S3=$prefix" >> "$GITHUB_ENV"
+          cd extension/
+          phpize
+          if [ "${{ matrix.sigqueue }}" = "no" ]; then
+            export ac_cv_func_sigqueue=no
+          fi
+          ./configure --with-meminfo-s3="$prefix"
+          make
+          php -d extension=$PWD/modules/meminfo.so --ri meminfo | grep -E '^(Version|S3 transport)'
+          php -d extension=$PWD/modules/meminfo.so --ri meminfo | grep -q '^S3 transport => yes'
+
+      # aws-c-s3 brings s2n and its own OpenSSL on Linux; none of it may be
+      # visible to the rest of the process (ext/openssl, ext/curl).
+      - name: Check that no CRT or OpenSSL symbol is exported
+        if: runner.os == 'Linux'
+        run: |
+          exported=$(nm -D --defined-only extension/modules/meminfo.so | awk '{print $3}')
+          echo "$exported"
+          if echo "$exported" | grep -qiE '^(SSL_|EVP_|OPENSSL|CRYPTO_|s2n_|aws_)'; then
+            echo "::error::meminfo.so exports CRT or OpenSSL symbols"
+            exit 1
+          fi
+
+      - name: Start the S3 server
+        if: runner.os == 'Linux'
+        run: |
+          docker run -d --name s3gw -p 7070:7070 \
+            -e ROOT_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" -e ROOT_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+            --entrypoint sh "$S3_GATEWAY_IMAGE" -c 'mkdir -p /data && exec versitygw --port :7070 posix /data'
+          for i in $(seq 1 50); do php -r 'exit(@fsockopen("127.0.0.1", 7070) ? 0 : 1);' && break; sleep 0.2; done
+          echo "MEMINFO_TEST_S3_ENDPOINT=http://127.0.0.1:7070" >> "$GITHUB_ENV"
+
+      - name: Test the extension (PHP 7)
+        if: runner.os == 'Linux' && startsWith(matrix.php-versions, '7.')
+        shell: bash
+        run: |
+          cd extension/
+          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 TEST_PHP_EXECUTABLE=$(which php) $(which php) run-tests.php -d extension=$PWD/modules/meminfo.so | tee run-tests.log
+
+      - name: Test the extension (PHP 8)
+        if: runner.os == 'Linux' && startsWith(matrix.php-versions, '8.')
+        shell: bash
+        run: |
+          cd extension/
+          REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test TESTS="tests/" | tee run-tests.log
+
+      # Without a server or an S3 build these tests skip, which would pass
+      # unnoticed.
+      - name: Check that the S3 tests ran
+        if: runner.os == 'Linux'
+        run: |
+          for test in signal on_limit failure no_wait process keep_local fork ini; do
+            grep -E "PASS.*tests/dump-s3_$test\.phpt" extension/run-tests.log
+          done
+
+      - name: Check that sigqueue() is disabled
+        if: matrix.sigqueue == 'no'
+        run: |
+          ! grep -q '^#define HAVE_SIGQUEUE' extension/config.h
+
+      - name: Diagnose failed S3 tests
+        if: failure()
+        run: |
+          bash tools/ci/diagnose-extension-tests.sh
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            docker logs s3gw > extension/test-diagnostics/s3-server.log 2>&1 || true
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: s3-tests-output-${{ matrix.os }}-php-${{ matrix.php-versions }}-sigqueue-${{ matrix.sigqueue }}
+          path: |
+            extension/tests/*.out
+            extension/tests/*.diff
+            extension/tests/*.exp
+            extension/tests/*.log
+            extension/run-tests.log
+            extension/config.log
+            extension/test-diagnostics/
 
   # How fast meminfo_dump() writes a ~2M-item graph (tools/bench/), against
   # master for a branch and against the previous commit on master. Both builds

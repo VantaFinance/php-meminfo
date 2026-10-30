@@ -102,6 +102,18 @@ PHP_INI_BEGIN()
         dump_threshold, zend_meminfo_globals, meminfo_globals)
     STD_PHP_INI_BOOLEAN("meminfo.track_allocations", "0", PHP_INI_SYSTEM, OnUpdateBool,
         track_allocations, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_ENTRY("meminfo.dump_upload", "", PHP_INI_SYSTEM, OnUpdateString,
+        dump_upload, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_BOOLEAN("meminfo.dump_upload_keep_local", "1", PHP_INI_SYSTEM, OnUpdateBool,
+        dump_upload_keep_local, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_ENTRY("meminfo.dump_upload_timeout", "120", PHP_INI_SYSTEM, OnUpdateLong,
+        dump_upload_timeout, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_ENTRY("meminfo.s3_region", "", PHP_INI_SYSTEM, OnUpdateString,
+        s3_region, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_ENTRY("meminfo.s3_endpoint", "", PHP_INI_SYSTEM, OnUpdateString,
+        s3_endpoint, zend_meminfo_globals, meminfo_globals)
+    STD_PHP_INI_BOOLEAN("meminfo.s3_path_style", "0", PHP_INI_SYSTEM, OnUpdateBool,
+        s3_path_style, zend_meminfo_globals, meminfo_globals)
 PHP_INI_END()
 
 /**
@@ -217,6 +229,7 @@ static PHP_MINIT_FUNCTION(meminfo)
 #if MEMINFO_HAVE_SIGNAL_DUMP
     meminfo_signal_module_startup();
 #endif
+    meminfo_upload_module_startup();
     meminfo_sites_module_startup();
 
     return SUCCESS;
@@ -225,6 +238,8 @@ static PHP_MINIT_FUNCTION(meminfo)
 static PHP_MSHUTDOWN_FUNCTION(meminfo)
 {
 #if MEMINFO_HAVE_SIGNAL_DUMP
+    // Before the ini entries go: the wait is bounded by dump_upload_timeout.
+    meminfo_upload_module_shutdown();
     meminfo_signal_module_shutdown();
 #endif
 
@@ -246,9 +261,10 @@ static PHP_RINIT_FUNCTION(meminfo)
     MEMINFO_G(dump_requested) = 0;
     MEMINFO_G(dump_id) = 0;
     MEMINFO_G(dumping) = 0;
-    MEMINFO_G(request_from_threshold) = 0;
+    MEMINFO_G(threshold_pending) = 0;
 
     meminfo_install_signal_handler();
+    meminfo_upload_poll();
 #endif
 
     return SUCCESS;
@@ -264,6 +280,9 @@ static PHP_RSHUTDOWN_FUNCTION(meminfo)
     MEMINFO_G(threshold_limit_seen) = ZEND_LONG_MIN;
 #if MEMINFO_HAVE_SIGNAL_DUMP
     meminfo_report_unserved_request();
+    // Never waits: in PHP-FPM the client's connection is only released after
+    // the whole request shutdown, so uploads finish in the background.
+    meminfo_upload_poll();
 #endif
 
 #if MEMINFO_HAVE_SIGNAL_DUMP
@@ -304,6 +323,12 @@ static PHP_MINFO_FUNCTION(meminfo)
     }
 
     php_info_print_table_row(2, "Dump directory", meminfo_dump_directory());
+#ifdef MEMINFO_HAVE_S3
+    php_info_print_table_row(2, "S3 transport", "yes (aws-c-s3)");
+#else
+    php_info_print_table_row(2, "S3 transport", "no (build with --with-meminfo-s3)");
+#endif
+    php_info_print_table_row(2, "Dump upload", meminfo_upload_target());
     php_info_print_table_end();
 
     DISPLAY_INI_ENTRIES();

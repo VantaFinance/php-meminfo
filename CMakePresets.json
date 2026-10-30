@@ -18,6 +18,15 @@
     { "name": "php-8.2", "displayName": "PHP 8.2", "inherits": "base", "cacheVariables": { "PHP_VERSION": "8.2" } },
     { "name": "php-8.3", "displayName": "PHP 8.3", "inherits": "base", "cacheVariables": { "PHP_VERSION": "8.3" } },
     { "name": "php-8.4", "displayName": "PHP 8.4", "inherits": "base", "cacheVariables": { "PHP_VERSION": "8.4" } },
-    { "name": "php-8.5", "displayName": "PHP 8.5", "inherits": "base", "cacheVariables": { "PHP_VERSION": "8.5" } }
+    { "name": "php-8.5", "displayName": "PHP 8.5", "inherits": "base", "cacheVariables": { "PHP_VERSION": "8.5" } },
+    {
+      "name": "vcpkg",
+      "hidden": true,
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": { "MEMINFO_S3": "ON" }
+    },
+    { "name": "php-8.4-s3", "displayName": "PHP 8.4 + S3 (vcpkg)", "inherits": ["vcpkg", "php-8.4"] },
+    { "name": "php-8.5-s3", "displayName": "PHP 8.5 + S3 (vcpkg)", "inherits": ["vcpkg", "php-8.5"] }
   ]
 }
+

@@ -97,12 +97,12 @@ static int meminfo_timestamp_compare(long a_sec, long a_usec, long b_sec, long b
 
 /**
  * Whether a directory entry is named exactly meminfo-<pid>-<sec>-<usec>.json,
- * or the same with .tmp, for this pid.
+ * or the same with .tmp or .uploaded, for this pid.
  *
  * The usec part is not zero-padded, so the timestamp is returned as numbers to
  * be compared as such, never as text.
  */
-static int meminfo_parse_pid_dump_name(const char *name, pid_t pid, long *sec, long *usec, int *is_temp)
+static int meminfo_parse_pid_dump_name(const char *name, pid_t pid, long *sec, long *usec, int *is_temp, int *is_uploaded)
 {
     char prefix[32];
     const char *cursor;
@@ -136,6 +136,8 @@ static int meminfo_parse_pid_dump_name(const char *name, pid_t pid, long *sec, l
         return 0;
     }
 
+    *is_uploaded = 0;
+
     if (strcmp(end, ".json") == 0) {
         *is_temp = 0;
         return 1;
@@ -143,6 +145,14 @@ static int meminfo_parse_pid_dump_name(const char *name, pid_t pid, long *sec, l
 
     if (strcmp(end, ".json.tmp") == 0) {
         *is_temp = 1;
+        return 1;
+    }
+
+    // A finished dump whose local copy went once it was uploaded
+    // (meminfo.dump_upload_keep_local=0): its record stands for it.
+    if (strcmp(end, ".json" MEMINFO_UPLOADED_SUFFIX) == 0) {
+        *is_temp = 0;
+        *is_uploaded = 1;
         return 1;
     }
 
@@ -188,9 +198,10 @@ static int meminfo_find_pid_dump(meminfo_dump_location *location, pid_t pid, con
         long sec;
         long usec;
         int is_temp;
+        int is_uploaded;
         int written;
 
-        if (!meminfo_parse_pid_dump_name(entry->d_name, pid, &sec, &usec, &is_temp)) {
+        if (!meminfo_parse_pid_dump_name(entry->d_name, pid, &sec, &usec, &is_temp, &is_uploaded)) {
             continue;
         }
 
@@ -215,6 +226,12 @@ static int meminfo_find_pid_dump(meminfo_dump_location *location, pid_t pid, con
         if (!meminfo_dump_file_is_trustworthy(path, pid)) {
             untrusted++;
             continue;
+        }
+
+        // The dump's own name: its upload record is found from there.
+        if (is_uploaded) {
+            written -= (int) (sizeof(MEMINFO_UPLOADED_SUFFIX) - 1);
+            path[written] = '\0';
         }
 
         memcpy(best_path, path, (size_t) written + 1);
@@ -356,6 +373,8 @@ typedef struct {
     int dump_id;
     zend_long timeout_seconds;
     int force;
+    /* wait for the target's upload of the dump and return its location */
+    int wait_upload;
     const char *dir;
     char dir_buffer[MAXPATHLEN];
     char resolved_dir[MAXPATHLEN];
@@ -386,7 +405,7 @@ typedef enum {
 /* --- options ----------------------------------------------------------- */
 
 /**
- * Read the "dir", "signal", "timeout" and "force" options over the ini
+ * Read the "dir", "signal", "timeout", "force" and "wait_upload" options over the ini
  * defaults. Throws InvalidArgumentException on a value that cannot be used.
  */
 static meminfo_step meminfo_dump_process_options(meminfo_dump_request *request, HashTable *option_table)
@@ -428,6 +447,11 @@ static meminfo_step meminfo_dump_process_options(meminfo_dump_request *request, 
     option = zend_hash_str_find(option_table, "force", sizeof("force") - 1);
     if (option != NULL) {
         request->force = zend_is_true(option);
+    }
+
+    option = zend_hash_str_find(option_table, "wait_upload", sizeof("wait_upload") - 1);
+    if (option != NULL) {
+        request->wait_upload = zend_is_true(option);
     }
 
     return MEMINFO_STEP_CONTINUE;
@@ -638,25 +662,159 @@ static meminfo_step meminfo_dump_process_ask(meminfo_dump_request *request)
 /* --- wait -------------------------------------------------------------- */
 
 /**
+ * The name of an upload record next to a dump.
+ */
+static int meminfo_upload_record_path(const char *dump_path, const char *suffix, char *buffer, size_t size)
+{
+    int written = snprintf(buffer, size, "%s%s", dump_path, suffix);
+
+    return written > 0 && (size_t) written < size;
+}
+
+/**
  * The location holding the finished dump, under either name, or -1.
  */
 static int meminfo_dump_process_find_finished(const meminfo_dump_request *request)
 {
+    char uploaded_path[MAXPATHLEN + 16];
     struct stat info;
     int i;
 
     for (i = 0; i < request->location_count; i++) {
         const meminfo_dump_location *location = &request->locations[i];
 
-        if (location->usable
-            && location->final_path[0] != '\0'
-            && stat(location->final_path, &info) == 0
-            && S_ISREG(info.st_mode)) {
+        if (!location->usable || location->final_path[0] == '\0') {
+            continue;
+        }
+        if (stat(location->final_path, &info) == 0 && S_ISREG(info.st_mode)) {
+            return i;
+        }
+        // Uploaded with meminfo.dump_upload_keep_local=0: only the record of
+        // the upload is left.
+        if (meminfo_upload_record_path(location->final_path, MEMINFO_UPLOADED_SUFFIX, uploaded_path, sizeof(uploaded_path))
+            && stat(uploaded_path, &info) == 0 && S_ISREG(info.st_mode)) {
             return i;
         }
     }
 
     return -1;
+}
+
+
+/**
+ * Whether the finished dump — or, once its local copy is gone, the record of
+ * its upload — passes the ownership check.
+ */
+static int meminfo_dump_process_finished_is_trustworthy(const meminfo_dump_request *request, int found)
+{
+    const char *final_path = request->locations[found].final_path;
+    char uploaded_path[MAXPATHLEN + 16];
+
+    if (access(final_path, F_OK) == 0) {
+        return meminfo_dump_file_is_trustworthy(final_path, request->pid);
+    }
+
+    return meminfo_upload_record_path(final_path, MEMINFO_UPLOADED_SUFFIX, uploaded_path, sizeof(uploaded_path))
+        && meminfo_dump_file_is_trustworthy(uploaded_path, request->pid);
+}
+
+/* Upload records are a line of text; anything longer was not written by meminfo. */
+#define MEMINFO_UPLOAD_RECORD_MAX 4096
+
+/**
+ * Read an upload record the target wrote next to its dump: owned by the
+ * target, a regular file with a single link, read without following links,
+ * trailing whitespace removed. Returns 1 when it was read.
+ */
+static int meminfo_read_upload_record(const char *path, pid_t pid, char *buffer, size_t size)
+{
+    ssize_t length;
+    int fd;
+
+    if (!meminfo_dump_file_is_trustworthy(path, pid)) {
+        return 0;
+    }
+
+    fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        return 0;
+    }
+
+    length = read(fd, buffer, size - 1);
+    close(fd);
+    if (length < 0) {
+        return 0;
+    }
+
+    buffer[length] = '\0';
+    while (length > 0 && (buffer[length - 1] == '\n' || buffer[length - 1] == '\r'
+        || buffer[length - 1] == ' ' || buffer[length - 1] == '\t')) {
+        buffer[--length] = '\0';
+    }
+
+    return 1;
+}
+
+/**
+ * What meminfo_dump_process() returns for a finished dump: the local path, or
+ * the location of the upload when it was asked to wait for it ("wait_upload")
+ * or when the local copy is already gone. Throws when the upload failed or
+ * did not finish in time.
+ */
+static void meminfo_dump_process_result(const meminfo_dump_request *request, int found, zval *return_value)
+{
+    const char *final_path = request->locations[found].final_path;
+    char uploaded_path[MAXPATHLEN + 16];
+    char error_path[MAXPATHLEN + 16];
+    char record[MEMINFO_UPLOAD_RECORD_MAX];
+    uint64_t deadline = meminfo_now_usec() + (uint64_t) request->timeout_seconds * 1000000ULL;
+    int local = access(final_path, F_OK) == 0;
+
+    if (!meminfo_upload_record_path(final_path, MEMINFO_UPLOADED_SUFFIX, uploaded_path, sizeof(uploaded_path))
+        || !meminfo_upload_record_path(final_path, MEMINFO_UPLOAD_ERROR_SUFFIX, error_path, sizeof(error_path))) {
+        RETVAL_STRING(final_path);
+        return;
+    }
+
+    if (local && !request->wait_upload) {
+        RETVAL_STRING(final_path);
+        return;
+    }
+
+    // The upload runs in the background of the target, after the dump.
+    for (;;) {
+        if (access(uploaded_path, F_OK) == 0) {
+            if (!meminfo_read_upload_record(uploaded_path, request->pid, record, sizeof(record))
+                || strncmp(record, "s3://", 5) != 0) {
+                zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+                    "meminfo_dump_process(): %s is not an upload record written by process %d; "
+                    "refusing to use it", uploaded_path, (int) request->pid);
+                return;
+            }
+            RETVAL_STRING(record);
+            return;
+        }
+
+        if (access(error_path, F_OK) == 0) {
+            if (!meminfo_read_upload_record(error_path, request->pid, record, sizeof(record))) {
+                snprintf(record, sizeof(record), "%s", "no reason given");
+            }
+            zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+                "meminfo_dump_process(): process %d wrote the dump to %s but could not upload it: %s",
+                (int) request->pid, final_path, record);
+            return;
+        }
+
+        if (meminfo_now_usec() > deadline) {
+            zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+                "meminfo_dump_process(): process %d wrote the dump to %s but did not finish uploading it "
+                "within %ld seconds (is meminfo.dump_upload set in the target?)",
+                (int) request->pid, final_path, (long) request->timeout_seconds);
+            return;
+        }
+
+        meminfo_sleep_usec(MEMINFO_POLL_INTERVAL_USEC);
+    }
 }
 
 /**
@@ -856,7 +1014,7 @@ static meminfo_step meminfo_dump_process_wait(meminfo_dump_request *request, int
         // round, a rename in between would make the dump look absent and the
         // request be sent again.
         found = meminfo_dump_process_find_finished(request);
-        if (found >= 0 && !meminfo_dump_file_is_trustworthy(request->locations[found].final_path, request->pid)) {
+        if (found >= 0 && !meminfo_dump_process_finished_is_trustworthy(request, found)) {
             zend_throw_exception_ex(spl_ce_RuntimeException, 0,
                 "meminfo_dump_process(): %s is not a regular file owned by process %d; "
                 "refusing to use it",
@@ -993,7 +1151,7 @@ PHP_FUNCTION(meminfo_dump_process)
     step = meminfo_dump_process_run(&request, pid_arg, options, &finished);
 
     if (finished >= 0) {
-        RETVAL_STRING(request.locations[finished].final_path);
+        meminfo_dump_process_result(&request, finished, return_value);
     }
 
     if (step == MEMINFO_STEP_REMOVE_PARTIAL) {

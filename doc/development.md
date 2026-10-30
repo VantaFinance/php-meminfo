@@ -36,6 +36,44 @@ $ REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test
 Every change must keep the PHP 7.0 – 8.5 CI matrix green; engine API differences are handled with
 `PHP_VERSION_ID` preprocessor guards.
 
+On a CI failure, the job prints PHPT diffs and saves runtime details, test output and child-process
+logs in its test artifact. It also replays failed `memory_limit` scenarios with
+`MEMINFO_DEBUG_DUMP=1`: `[FIX:oom]` stderr lines show error-hook registration, error notifications
+and dump-file progress without reading dump contents. This trace is off by default; enabling it
+during the normal suite changes stderr expectations. `MEMINFO_TEST_KEEP_CHILD_OUTPUT=1` keeps
+fixture scripts and child stdout/stderr/error logs in PHP's temporary directory for collection.
+
+### OOM engine compatibility
+
+Record the actual PHP binary/package or source revision when reproducing an OOM failure.
+There are separate engine behaviors: legacy fatal/bailout, EOL security backports that use
+`_exit(1)` without error callbacks/shutdown, and supported patched releases that defer soft OOM
+to a VM safe point but immediately exit on a hard limit. Do not classify a binary using only
+its PHP minor version. An extension interrupt cannot override native pending OOM processing.
+
+`dump-on_limit.phpt` first classifies a child running without meminfo, then asserts either a
+fatal-time `memory_limit` dump or the explicitly unavailable callback with the same native exit
+and shutdown behavior. Unknown native controls fail. `dump-on_threshold*.phpt` independently
+requires early capture, GC preservation, real JIT execution, deferral and failure cleanup.
+`dump-s3_on_limit.phpt` applies the same lifecycle distinction; early S3 tests separately confirm
+upload completion before fatal termination or hold the server response to prove interruption.
+
+The `oom-engines` CI job builds digest-pinned legacy PHP 8.1 and an exact Ubuntu security-backport
+package, verifies their different native outcomes and records binary/module/source hashes in
+`oom-engine.json`. Its FPM variant checks worker reuse, per-request reset and replacement after
+immediate exit. Images are described in `tools/repro/oom-hooks/Dockerfile`; a missing pinned
+package or changed native behavior fails the build instead of selecting the newest package.
+
+The test-only `fault_probe.c` module injects native `get_gc` bailout, a retained allocation that
+prevents limit restoration, and an ENOSPC sink for the private dump descriptor. It is compiled
+only in the OOM test images, never linked into meminfo. Ordinary builds can skip that fixture;
+the dedicated engine jobs must run `dump-on_threshold_cleanup.phpt` with it loaded in children.
+
+The isolated experiments in `tools/repro/oom-hooks/` are not a production backend. Installing
+custom allocation handlers marks even a delegated native heap as custom: Zend GC then returns
+without collecting cached pages. Semantic verification must check reclamation, memory-limit
+enforcement and automatic request cleanup, not just JSON validity or the final exit status.
+
 Version and copyright year
 --------------------------
 
@@ -87,6 +125,21 @@ several minutes to install the compiler toolchain; later builds reuse the cached
 
 `make repro`, `make repro-test` and `make repro-build` do the same with ext-protobuf (and optionally
 ext-grpc, `WITH_GRPC=1`) loaded; see `tools/repro/protobuf/`.
+
+The S3 transport (`--with-meminfo-s3`) has its own image, built on the Debian `php:<version>-cli`
+image with aws-c-s3 from vcpkg, and a local S3 server ([versitygw](https://github.com/versity/versitygw))
+started next to it:
+
+```bash
+$ make s3-test          PHP_VERSION=8.4   # the .phpt suite, dump-s3_*.phpt included
+$ make s3-test-valgrind PHP_VERSION=8.4   # the S3 tests with the dumping processes under valgrind
+$ make repro-s3-fpm     PHP_VERSION=8.4   # PHP-FPM scenarios: per-pool settings, hung uploads, clear_env
+$ make s3-shell         PHP_VERSION=8.4   # a shell in the image, the S3 server at http://s3:7070
+```
+
+`S3_TESTS` narrows `s3-test` to some tests. To build with S3 outside Docker, `make vcpkg-install`
+installs the dependencies into `vcpkg_installed/` and `make build MEMINFO_S3=vcpkg_installed/<triplet>`
+links them in.
 
 IDE setup (CLion)
 -----------------
