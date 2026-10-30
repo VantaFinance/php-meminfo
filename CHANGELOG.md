@@ -1,4 +1,4 @@
-# Unreleased
+# 0.2.0
 
 ## Added
  - **Complete roots.** The dump now also reaches:
